@@ -1,0 +1,24 @@
+cluster:
+  num_nodes: 4
+  base_port: 8100
+
+network:
+  lan_delay_ms: 0.2
+  delay_jitter_ms: 0.05
+
+node:
+  max_tokens: 1000
+  eviction_policy: "lru"
+
+llm:
+  prefill_cost_factor: 0.00001
+  decode_cost_factor: 0.0001
+  max_output_tokens: 1
+
+router:
+  policy: "self" # "cache_aware"
+
+broadcast:
+  trigger: "timer"
+  queue_threshold: 3
+  interval_s: 3.0
