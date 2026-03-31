@@ -41,6 +41,16 @@ class BroadcastConfig:
 
 
 @dataclass
+class RequestsConfig:
+    csv_path: str = "data/requests.csv"
+    topics: list = field(default_factory=list)  # regex patterns; empty = all
+    rows_per_topic: int = 0  # 0 = all rows from each selected topic
+    shuffle: bool = True
+    seed: int = 42
+    node_assignment: str = "original"  # original | round_robin | hash_topic | random
+
+
+@dataclass
 class Config:
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -48,6 +58,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     router: RouterConfig = field(default_factory=RouterConfig)
     broadcast: BroadcastConfig = field(default_factory=BroadcastConfig)
+    requests: RequestsConfig = field(default_factory=RequestsConfig)
 
 
 def load_config(path: str = "config/default.yaml") -> Config:
@@ -69,6 +80,7 @@ def load_config(path: str = "config/default.yaml") -> Config:
         ("llm", LLMConfig),
         ("router", RouterConfig),
         ("broadcast", BroadcastConfig),
+        ("requests", RequestsConfig),
     ]:
         if section_name in raw:
             setattr(config, section_name, section_cls(**raw[section_name]))

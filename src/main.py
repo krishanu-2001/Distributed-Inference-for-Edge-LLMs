@@ -3,7 +3,6 @@ import argparse
 import csv
 import logging
 import aiohttp
-import pandas as pd
 import sys
 import os
 from datetime import datetime
@@ -15,6 +14,7 @@ from src.config import load_config
 from src.node import InferenceNode
 from src.network import NetworkSimulator
 from src.visualization import Visualizer
+from src.request_loader import load_requests
 
 _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 _run_dir = f"runs/run_{_timestamp}"
@@ -67,16 +67,30 @@ async def run_demo(nodes: list[InferenceNode], config):
     print(f"Broadcast trigger: {config.broadcast.trigger}")
     print()
 
-    # Load requests from CSV
-    df = pd.read_csv("data/requests.csv")
-    print("--- Request Dataset ---")
-    print(f"  Total requests: {len(df)}")
-    print(f"  Unique prompts: {df['text'].nunique()}")
-    print(f"  Target nodes:   {sorted(df['target_node'].unique().tolist())}")
-    print(f"  Avg prompt len: {df['text'].str.split().str.len().mean():.1f} words")
+    # Load requests via config-driven loader
+    req_cfg = config.requests
+    rows = load_requests(req_cfg, config.cluster.num_nodes)
+
+    # Print expanded config & summary
+    print("--- Request Config ---")
+    print(f"  CSV:             {req_cfg.csv_path}")
+    print(f"  Topic patterns:  {req_cfg.topics or ['* (all)']}")
+    topics_in_data = sorted(set(r['subject'] for r in rows))
+    print(f"  Matched topics ({len(topics_in_data)}):")
+    from collections import Counter
+    topic_counts = Counter(r['subject'] for r in rows)
+    for t in topics_in_data:
+        print(f"    - {t}: {topic_counts[t]} rows")
+    node_counts = Counter(r['target_node'] for r in rows)
+    print(f"  Node assignment: {req_cfg.node_assignment}")
+    for n in sorted(node_counts):
+        print(f"    node {n}: {node_counts[n]} requests")
+    print(f"  Shuffle:         {req_cfg.shuffle}")
+    print(f"  Seed:            {req_cfg.seed}")
+    print(f"  Total requests:  {len(rows)}")
     print()
 
-    requests = list(zip(df["text"], df["target_node"], df["subject"]))
+    requests = [(r["text"], r["target_node"], r["subject"]) for r in rows]
 
     # Open CSV for incremental writing
     csv_path = f"{_run_dir}/results.csv"

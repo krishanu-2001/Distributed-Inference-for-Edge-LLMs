@@ -22,3 +22,14 @@ broadcast:
   trigger: "queue_length"
   queue_threshold: 3
   interval_s: 5.0
+
+requests:
+  csv_path: "data/requests.csv"
+  topics:               # regex patterns — empty list means all 57 topics
+    - "high_school_.*"  # all high school subjects
+    - "philosophy"
+    - "machine_learning"
+  rows_per_topic: 2    # 0 = take all rows from each matched topic
+  shuffle: true
+  seed: 42
+  node_assignment: "round_robin"  # original | round_robin | hash_topic | random
