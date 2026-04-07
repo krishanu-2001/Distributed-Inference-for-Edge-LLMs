@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distributed Inference - Experiment Runner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { d: { 900: '#0f1117', 800: '#1a1d27', 700: '#252836', 600: '#2a2d3a' } } } }
+    }
+  </script>
+</head>
+<body class="bg-d-900 text-gray-200 min-h-screen">
+<div class="max-w-5xl mx-auto px-4 py-6">
+  <h1 class="text-xl font-semibold text-white">Distributed Inference <span class="text-sm font-normal text-gray-500">Experiment Runner</span></h1>
+
+  <div class="grid grid-cols-1 gap-4 mt-5">
+
+    <!-- JSON Editor -->
+    <div class="col-span-2 bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Config YAML</h2>
+      <textarea id="yaml_editor" spellcheck="false" class="w-full h-80 px-3 py-2 bg-[#0a0c10] border border-d-600 rounded-md font-mono text-xs text-gray-300 focus:outline-none focus:border-indigo-500 resize-y leading-relaxed"></textarea>
+      <div id="yaml_error" class="text-xs text-red-400 mt-1 hidden"></div>
+    </div>
+
+    <!-- Available Topics -->
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Available Topics <span id="topic_count" class="text-gray-600"></span></h2>
+      <p class="text-xs text-gray-600 mb-2">Click a topic to add it to the YAML config. Format: <code class="text-indigo-400">topic:fraction</code></p>
+      <div class="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto" id="topics_grid"></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="col-span-2 bg-d-800 border border-d-600 rounded-lg p-4">
+      <div class="flex items-center gap-3">
+        <button id="btn_start" onclick="startExperiment()" class="px-6 py-2.5 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">Run Experiment</button>
+        <button id="btn_stop" onclick="stopExperiment()" disabled class="px-6 py-2.5 bg-red-600 text-white font-semibold rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed">Stop</button>
+        <button onclick="killPorts()" class="px-4 py-2.5 bg-d-700 border border-d-600 text-gray-300 text-sm rounded-md hover:bg-d-600">Kill Ports</button>
+        <span id="status_badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-d-700 text-gray-500">Idle</span>
+        <span class="text-xs text-gray-600">Edit the YAML config above, then run.</span>
+      </div>
+      <pre id="output_box" class="mt-3 bg-[#0a0c10] border border-d-600 rounded-md p-3 font-mono text-xs text-gray-500 max-h-72 overflow-y-auto whitespace-pre-wrap">Ready. Configure and click "Run Experiment".</pre>
+    </div>
+
+    <!-- Past Runs -->
+    <div class="col-span-2 bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Past Runs</h2>
+      <div id="runs_list" class="space-y-1.5">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let allTopics={};
+
+async function init(){
+  const[config,topics]=await Promise.all([
+    fetch('/api/config').then(r=>r.json()),
+    fetch('/api/topics').then(r=>r.json()),
+  ]);
+  allTopics=topics;
+  document.getElementById('yaml_editor').value=jsyaml.dump(config,{sortKeys:false,lineWidth:-1});
+  renderTopics();loadRuns();pollStatus();
+}
+
+function renderTopics(){
+  const grid=document.getElementById('topics_grid');
+  document.getElementById('topic_count').textContent=`(${Object.keys(allTopics).length})`;
+  // Parse current YAML to highlight active topics
+  const active=new Set();
+  try{
+    const cfg=jsyaml.load(document.getElementById('yaml_editor').value);
+    (cfg?.requests?.topics||[]).forEach(t=>{const name=t.includes(':')?t.split(':')[0]:t;active.add(name)});
+  }catch(e){}
+  grid.innerHTML='';
+  for(const[topic,count]of Object.entries(allTopics)){
+    const sel=active.has(topic);
+    const chip=document.createElement('div');
+    chip.className=`group relative px-2.5 py-1 rounded-full text-xs cursor-pointer select-all border transition ${sel?'bg-indigo-600 border-indigo-600 text-white':'bg-d-700 border-d-600 text-gray-400 hover:border-indigo-500'}`;
+    chip.innerHTML=`${topic} <span class="${sel?'text-indigo-200':'text-gray-600'}">(${count})</span><span class="copy-hint hidden group-hover:inline ml-1 text-[10px] ${sel?'text-indigo-200':'text-gray-600'}">click to copy</span>`;
+    chip.onclick=(e)=>{const copyText=topic+':0.2';navigator.clipboard.writeText(copyText);const h=chip.querySelector('.copy-hint');h.textContent='copied!';setTimeout(()=>{h.textContent='click to copy'},800)};
+    grid.appendChild(chip);
+  }
+}
+
+function toggleTopic(topic){
+  const editor=document.getElementById('yaml_editor');
+  try{
+    const cfg=jsyaml.load(editor.value)||{};
+    if(!cfg.requests)cfg.requests={};
+    if(!cfg.requests.topics)cfg.requests.topics=[];
+    const idx=cfg.requests.topics.findIndex(t=>t===topic||t.startsWith(topic+':'));
+    if(idx>=0){cfg.requests.topics.splice(idx,1)}
+    else{cfg.requests.topics.push(topic+':1.0')}
+    editor.value=jsyaml.dump(cfg,{sortKeys:false,lineWidth:-1});
+    renderTopics();
+  }catch(e){}
+}
+
+function getYamlConfig(){
+  const editor=document.getElementById('yaml_editor'),err=document.getElementById('yaml_error');
+  try{const c=jsyaml.load(editor.value);err.classList.add('hidden');return c}
+  catch(e){err.textContent='Invalid YAML: '+e.message;err.classList.remove('hidden');return null}
+}
+
+async function startExperiment(){
+  const config=getYamlConfig();
+  if(!config)return;
+  document.getElementById('btn_start').disabled=true;document.getElementById('btn_stop').disabled=false;
+  document.getElementById('output_box').textContent='Starting experiment...\n';
+  setBadge('bg-green-900/50 text-green-400','Running');
+  const r=await fetch('/api/experiment/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+  const d=await r.json();
+  if(!r.ok){appendOutput('Error: '+(d.detail||JSON.stringify(d)));setBadge('bg-d-700 text-red-400','Error');document.getElementById('btn_start').disabled=false;document.getElementById('btn_stop').disabled=true;return}
+  appendOutput(`PID: ${d.pid}\nConfig: ${d.config}\n`);
+}
+
+async function stopExperiment(){
+  await fetch('/api/experiment/stop',{method:'POST'});setBadge('bg-d-700 text-gray-500','Stopped');
+  document.getElementById('btn_start').disabled=false;document.getElementById('btn_stop').disabled=true;appendOutput('\n--- Stopped ---\n');loadRuns();
+}
+
+async function pollStatus(){
+  try{const r=await fetch('/api/experiment/status'),d=await r.json();
+    if(d.running){setBadge('bg-green-900/50 text-green-400','Running');document.getElementById('btn_start').disabled=true;document.getElementById('btn_stop').disabled=false}
+    else if(d.output){appendOutput(d.output);setBadge('bg-indigo-900/50 text-indigo-400',`Done (exit ${d.exit_code})`);document.getElementById('btn_start').disabled=false;document.getElementById('btn_stop').disabled=true;loadRuns();killPorts()}
+  }catch(e){}
+  setTimeout(pollStatus,2000);
+}
+
+async function killPorts(){
+  appendOutput('\nKilling processes on cluster ports...\n');
+  const r=await fetch('/api/experiment/kill-ports',{method:'POST'});
+  const d=await r.json();
+  if(d.killed&&d.killed.length>0){appendOutput('Killed: '+d.killed.map(k=>`port ${k.port} (pid ${k.pid})`).join(', ')+'\n')}
+  else{appendOutput('No processes found on cluster ports.\n')}
+  document.getElementById('btn_start').disabled=false;document.getElementById('btn_stop').disabled=true;
+  setBadge('bg-d-700 text-gray-500','Idle');
+}
+
+function setBadge(c,t){const b=document.getElementById('status_badge');b.className=`px-3 py-1 rounded-full text-xs font-semibold ${c}`;b.textContent=t}
+function appendOutput(t){const b=document.getElementById('output_box');b.textContent+=t;b.scrollTop=b.scrollHeight}
+
+async function loadRuns(){
+  const r=await fetch('/api/runs'),runs=await r.json(),el=document.getElementById('runs_list');
+  if(runs.length===0){el.innerHTML='<p class="text-sm text-gray-600">No runs yet.</p>';return}
+  el.innerHTML=runs.map(r=>`<a href="/dashboard/${r.name}" class="flex justify-between items-center px-3 py-2.5 bg-d-700 rounded-md hover:bg-d-600 transition cursor-pointer block">
+    <div><div class="text-sm text-gray-300">${r.name}</div><div class="text-xs text-gray-600">${r.num_requests??'?'} requests</div></div>
+    <div class="flex gap-6 text-right items-center">
+      <div><div class="text-[10px] text-gray-600">Avg Cache Hit</div><div class="text-sm">${r.avg_cache_hit!=null?(r.avg_cache_hit*100).toFixed(1)+'%':'—'}</div></div>
+      <div><div class="text-[10px] text-gray-600">Avg Time</div><div class="text-sm">${r.avg_time_s!=null?r.avg_time_s.toFixed(4)+'s':'—'}</div></div>
+      <div class="text-indigo-400 text-xs">&rarr;</div>
+    </div></a>`).join('');
+}
+
+init();
+</script>
+</body>
+</html>

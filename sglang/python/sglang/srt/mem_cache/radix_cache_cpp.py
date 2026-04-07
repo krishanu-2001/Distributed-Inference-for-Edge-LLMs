@@ -256,5 +256,18 @@ class RadixCacheCpp(BasePrefixCache):
             req.prefix_indices = new_indices
         req.last_node = new_last_node
 
+    def snapshot(self) -> dict:
+        """Return a lightweight CPU-only snapshot (C++ backend).
+
+        The C++ tree doesn't expose node-level iteration, so we return
+        aggregate stats only. The Python RadixCache provides full node data.
+        """
+        total = self.total_size()
+        return {
+            "total_tokens": total,
+            "num_nodes": 0,
+            "nodes": [],
+        }
+
     def pretty_print(self):
         return self.tree.debug_print()

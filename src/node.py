@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import json
+import os
 import random
 import time
 import logging
@@ -82,6 +84,17 @@ class InferenceNode:
         self._queue_task = None
         self._broadcast_task = None
         self.request_log: list[dict] = []
+        self._metrics_task = None
+        self._metrics_file = None
+        self._metrics_writer = None
+        self._total_requests = 0
+        self._total_cache_hits = 0
+        self._total_routed = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._last_metrics_time = None
+        self._last_metrics_requests = 0
+        self._last_metrics_tokens = 0
 
     def _setup_routes(self):
         self.app.router.add_post("/infer", self.handle_infer)
@@ -197,6 +210,11 @@ class InferenceNode:
                 "cache_utilization": round(self.kv_cache.utilization, 4),
             }
             self.request_log.append(result)
+            self._total_requests += 1
+            self._total_input_tokens += len(token_ids)
+            self._total_output_tokens += len(output_tokens)
+            if match_len > 0:
+                self._total_cache_hits += 1
             return result
 
         finally:
@@ -221,6 +239,7 @@ class InferenceNode:
                     # Forward to another node
                     # TODO: redirecting the redirects. Need to send it to the router.
                     # TODO: parallelize update the approx tree and request forwarding & error handling.
+                    self._total_routed += 1
                     logger.info(
                         f"Node {self.node_id}: routing to Node {best_node}"
                     )
@@ -263,6 +282,72 @@ class InferenceNode:
         all_ports = [self.all_ports[nid] for nid in self.all_node_ids]
         await self.network.broadcast(self.port, all_ports, "sync_tree", data)
 
+    # --- Metrics ---
+
+    def start_metrics(self, run_dir: str, interval_s: float = 20.0):
+        """Start periodic metrics logging to a shared CSV."""
+        self._metrics_interval = interval_s
+        metrics_path = os.path.join(run_dir, "metrics.csv")
+        file_exists = os.path.exists(metrics_path)
+        self._metrics_file = open(metrics_path, "a", newline="")
+        self._metrics_writer = csv.DictWriter(self._metrics_file, fieldnames=[
+            "timestamp", "node_id", "queue_length", "running_requests",
+            "total_requests", "total_routed", "total_cache_hits",
+            "total_input_tokens", "total_output_tokens",
+            "req_throughput", "token_throughput",
+            "cache_used_tokens", "cache_max_tokens", "cache_utilization",
+            "cache_entries", "radix_tree_tokens",
+        ])
+        if not file_exists:
+            self._metrics_writer.writeheader()
+            self._metrics_file.flush()
+        self._metrics_task = asyncio.create_task(self._metrics_loop())
+
+    async def _metrics_loop(self):
+        """Emit a metrics row every N seconds."""
+        self._last_metrics_time = time.time()
+        self._last_metrics_requests = 0
+        self._last_metrics_tokens = 0
+        try:
+            while True:
+                await asyncio.sleep(self._metrics_interval)
+                now = time.time()
+                elapsed = now - self._last_metrics_time
+                delta_reqs = self._total_requests - self._last_metrics_requests
+                total_tokens = self._total_input_tokens + self._total_output_tokens
+                delta_tokens = total_tokens - self._last_metrics_tokens
+
+                req_throughput = round(delta_reqs / elapsed, 4) if elapsed > 0 else 0
+                token_throughput = round(delta_tokens / elapsed, 4) if elapsed > 0 else 0
+
+                self._last_metrics_time = now
+                self._last_metrics_requests = self._total_requests
+                self._last_metrics_tokens = total_tokens
+
+                cache = self.kv_cache.stats()
+                row = {
+                    "timestamp": now,
+                    "node_id": self.node_id,
+                    "queue_length": self.incoming_queue.qsize(),
+                    "running_requests": self.running_requests,
+                    "total_requests": self._total_requests,
+                    "total_routed": self._total_routed,
+                    "total_cache_hits": self._total_cache_hits,
+                    "total_input_tokens": self._total_input_tokens,
+                    "total_output_tokens": self._total_output_tokens,
+                    "req_throughput": req_throughput,
+                    "token_throughput": token_throughput,
+                    "cache_used_tokens": cache["used_tokens"],
+                    "cache_max_tokens": cache["max_tokens"],
+                    "cache_utilization": round(cache["utilization"], 4),
+                    "cache_entries": cache["num_entries"],
+                    "radix_tree_tokens": self.radix_tree.total_tokens,
+                }
+                self._metrics_writer.writerow(row)
+                self._metrics_file.flush()
+        except asyncio.CancelledError:
+            pass
+
     # --- Lifecycle ---
 
     async def start(self):
@@ -284,6 +369,10 @@ class InferenceNode:
             self._queue_task.cancel()
         if self._broadcast_task:
             self._broadcast_task.cancel()
+        if self._metrics_task:
+            self._metrics_task.cancel()
+        if self._metrics_file:
+            self._metrics_file.close()
         if self._runner:
             await self._runner.cleanup()
         logger.info(f"Node {self.node_id} stopped")

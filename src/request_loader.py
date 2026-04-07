@@ -24,18 +24,64 @@ class RequestsConfig:
     node_assignment: str = "original"  # original | round_robin | hash_topic | random
 
 
-def _match_topics(patterns: list[str], available: list[str]) -> list[str]:
-    """Return available topics that match any of the regex patterns."""
-    if not patterns:
-        return sorted(available)
+def _parse_topic_entry(entry: str) -> tuple[str, Optional[float]]:
+    """
+    Parse a topic entry which may include a fraction.
+    Formats:
+      "philosophy"         -> ("philosophy", None)  # None means all rows
+      "philosophy:0.2"     -> ("philosophy", 0.2)
+      "philosophy:0"       -> ("philosophy", 0.0)   # explicitly 0 = skip
+      "high_school_.*:0.5" -> ("high_school_.*", 0.5)
+    """
+    if ":" in entry:
+        parts = entry.rsplit(":", 1)
+        try:
+            frac = float(parts[1])
+            return parts[0], frac
+        except ValueError:
+            pass
+    return entry, None
 
-    matched = set()
-    for pattern in patterns:
-        regex = re.compile(pattern, re.IGNORECASE)
-        for topic in available:
-            if regex.search(topic):
-                matched.add(topic)
-    return sorted(matched)
+
+def _match_topics(patterns: list[str], available: list[str]) -> tuple[list[str], dict[str, float]]:
+    """
+    Return available topics that match any of the regex patterns,
+    plus per-topic fraction overrides.
+
+    Entries are processed in order. "*" matches all topics not already
+    matched by previous entries:
+        - "philosophy:0.2"       # 20% of philosophy
+        - "machine_learning:0.2" # 20% of machine_learning
+        - "*:0.8"                # 80% of every remaining topic
+    """
+    if not patterns:
+        return sorted(available), {}
+
+    matched_order: list[str] = []  # preserve insertion order
+    matched_set: set[str] = set()
+    fractions: dict[str, float] = {}
+
+    for entry in patterns:
+        pattern, frac = _parse_topic_entry(entry)
+
+        # "*" = wildcard for all topics not yet matched
+        if pattern == "*":
+            for topic in sorted(available):
+                if topic not in matched_set:
+                    matched_set.add(topic)
+                    matched_order.append(topic)
+                    if frac is not None:
+                        fractions[topic] = frac
+        else:
+            regex = re.compile(pattern, re.IGNORECASE)
+            for topic in available:
+                if regex.search(topic) and topic not in matched_set:
+                    matched_set.add(topic)
+                    matched_order.append(topic)
+                    if frac is not None:
+                        fractions[topic] = frac
+
+    return sorted(matched_order), fractions
 
 
 def _assign_nodes(
@@ -76,13 +122,24 @@ def load_requests(requests_cfg: RequestsConfig, num_nodes: int) -> list[dict]:
     available_topics = list(all_rows.keys())
 
     # Match topics via regex patterns
-    selected_topics = _match_topics(requests_cfg.topics, available_topics)
+    selected_topics, fractions = _match_topics(requests_cfg.topics, available_topics)
 
     if not selected_topics:
         raise ValueError(
             f"No topics matched patterns {requests_cfg.topics}. "
             f"Available: {sorted(available_topics)}"
         )
+
+    # Compute how many rows to take per topic
+    def _rows_to_take(topic: str, total: int) -> int:
+        # Per-topic fraction override (e.g. "philosophy:0.2", "*:0" = skip)
+        if topic in fractions:
+            return int(fractions[topic] * total)
+        # Default: all rows
+        return total
+
+    # Filter out topics with 0 rows to take
+    selected_topics = [t for t in selected_topics if _rows_to_take(t, len(all_rows[t])) > 0]
 
     # Log expanded config
     logger.info("--- Request Config ---")
@@ -91,8 +148,9 @@ def load_requests(requests_cfg: RequestsConfig, num_nodes: int) -> list[dict]:
     logger.info(f"  Matched topics ({len(selected_topics)}):")
     for t in selected_topics:
         count = len(all_rows[t])
-        take = min(requests_cfg.rows_per_topic, count) if requests_cfg.rows_per_topic > 0 else count
-        logger.info(f"    - {t}: {take}/{count} rows")
+        take = _rows_to_take(t, count)
+        frac_str = f" ({fractions[t]:.0%})" if t in fractions else ""
+        logger.info(f"    - {t}: {take}/{count} rows{frac_str}")
     logger.info(f"  Shuffle: {requests_cfg.shuffle}")
     logger.info(f"  Seed: {requests_cfg.seed}")
     logger.info(f"  Node assignment: {requests_cfg.node_assignment}")
@@ -103,9 +161,9 @@ def load_requests(requests_cfg: RequestsConfig, num_nodes: int) -> list[dict]:
     result = []
     for topic in selected_topics:
         rows = all_rows[topic]
-        if requests_cfg.rows_per_topic > 0:
-            # Deterministic sample
-            sampled = rng.sample(rows, min(requests_cfg.rows_per_topic, len(rows)))
+        take = _rows_to_take(topic, len(rows))
+        if take < len(rows):
+            sampled = rng.sample(rows, take)
         else:
             sampled = list(rows)
         result.extend(sampled)

@@ -71,23 +71,13 @@ async def run_demo(nodes: list[InferenceNode], config):
     req_cfg = config.requests
     rows = load_requests(req_cfg, config.cluster.num_nodes)
 
-    # Print expanded config & summary
-    print("--- Request Config ---")
-    print(f"  CSV:             {req_cfg.csv_path}")
-    print(f"  Topic patterns:  {req_cfg.topics or ['* (all)']}")
-    topics_in_data = sorted(set(r['subject'] for r in rows))
-    print(f"  Matched topics ({len(topics_in_data)}):")
+    # Print summary
     from collections import Counter
     topic_counts = Counter(r['subject'] for r in rows)
-    for t in topics_in_data:
-        print(f"    - {t}: {topic_counts[t]} rows")
     node_counts = Counter(r['target_node'] for r in rows)
-    print(f"  Node assignment: {req_cfg.node_assignment}")
+    print(f"Loaded {len(rows)} requests across {len(topic_counts)} topics")
     for n in sorted(node_counts):
-        print(f"    node {n}: {node_counts[n]} requests")
-    print(f"  Shuffle:         {req_cfg.shuffle}")
-    print(f"  Seed:            {req_cfg.seed}")
-    print(f"  Total requests:  {len(rows)}")
+        print(f"  node {n}: {node_counts[n]} requests")
     print()
 
     requests = [(r["text"], r["target_node"], r["subject"]) for r in rows]
@@ -95,7 +85,7 @@ async def run_demo(nodes: list[InferenceNode], config):
     # Open CSV for incremental writing
     csv_path = f"{_run_dir}/results.csv"
     fieldnames = [
-        "request_id", "subject", "text", "target_node", "processed_by",
+        "request_id", "subject", "target_node", "processed_by",
         "routed_from", "routed_to", "input_tokens", "output_tokens",
         "cache_hit_tokens", "cache_hit_ratio", "inference_time_s",
         "total_time_s", "cache_utilization", "error",
@@ -122,7 +112,6 @@ async def run_demo(nodes: list[InferenceNode], config):
         row = {
             "request_id": i,
             "subject": subject,
-            "text": text[-100:],
             "target_node": target_node,
             "processed_by": result.get("node_id"),
             "routed_from": result.get("routed_from"),
@@ -156,6 +145,10 @@ async def run_demo(nodes: list[InferenceNode], config):
 
 async def main(config_path: str):
     config = load_config(config_path)
+
+    # Save config to run directory
+    import shutil
+    shutil.copy2(config_path, f"{_run_dir}/config.yaml")
     network = NetworkSimulator(config.network.lan_delay_ms, config.network.delay_jitter_ms)
 
     all_node_ids = list(range(config.cluster.num_nodes))
@@ -176,6 +169,7 @@ async def main(config_path: str):
     # Start all nodes
     for node in nodes:
         await node.start()
+        node.start_metrics(_run_dir, interval_s=20.0)
 
     logger.info(f"All {config.cluster.num_nodes} nodes started.")
 

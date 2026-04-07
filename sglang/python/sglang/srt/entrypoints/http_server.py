@@ -618,6 +618,24 @@ async def server_info():
     }
 
 
+@app.get("/v1/cache/tree")
+async def get_cache_tree():
+    """Return a CPU-only snapshot of the radix tree for external cache-aware routing.
+
+    Each SGLang server exposes its current KV-cache prefix tree so that an
+    external router can decide which node already has the best prefix match
+    for an incoming request.
+    """
+    internal_states = await _global_state.tokenizer_manager.get_internal_state()
+    # One entry per DP rank; most setups have dp_size=1
+    snapshots = []
+    for state in internal_states:
+        snap = state.get("radix_tree_snapshot")
+        if snap is not None:
+            snapshots.append(snap)
+    return {"snapshots": snapshots}
+
+
 @app.get("/get_load")
 async def get_load():
     """Get load metrics (deprecated - use /v1/loads instead)."""

@@ -3086,6 +3086,10 @@ class Scheduler(
         if RECORD_STEP_TIME:
             ret["step_time_dict"] = self.step_time_dict
 
+        # Radix tree snapshot for external cache-aware routing
+        if hasattr(self.tree_cache, "snapshot"):
+            ret["radix_tree_snapshot"] = self.tree_cache.snapshot()
+
         # This field is not serializable.
         ret.pop("model_config", None)
 

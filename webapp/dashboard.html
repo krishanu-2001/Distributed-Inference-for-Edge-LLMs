@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { d: { 900: '#0f1117', 800: '#1a1d27', 700: '#252836', 600: '#2a2d3a' } } } }
+    }
+  </script>
+</head>
+<body class="bg-d-900 text-gray-200 min-h-screen">
+<div class="max-w-6xl mx-auto px-4 py-6">
+
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-xl font-semibold text-white">Node Dashboard <span id="run_name" class="text-sm font-normal text-gray-500"></span></h1>
+    <a href="/" class="text-xs text-indigo-400 hover:text-indigo-300">&larr; Back to Experiments</a>
+  </div>
+
+  <!-- Config (collapsible) -->
+  <details class="bg-d-800 border border-d-600 rounded-lg mb-4">
+    <summary class="px-4 py-3 cursor-pointer text-xs uppercase tracking-widest text-gray-500 hover:text-gray-300 select-none">Config</summary>
+    <pre id="config_yaml" class="px-4 pb-4 font-mono text-xs text-gray-400 whitespace-pre-wrap">Loading...</pre>
+  </details>
+
+  <!-- Summary Cards -->
+  <div id="summary_cards" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6"></div>
+
+  <!-- Per-Node Stats -->
+  <div class="bg-d-800 border border-d-600 rounded-lg p-4 mb-4">
+    <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Per-Node Summary</h2>
+    <div id="node_table" class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead><tr class="text-gray-500 border-b border-d-600">
+          <th class="text-left py-2 px-2">Node</th>
+          <th class="text-right py-2 px-2">Requests</th>
+          <th class="text-right py-2 px-2">Routed Out</th>
+          <th class="text-right py-2 px-2">Cache Hits</th>
+          <th class="text-right py-2 px-2">Avg Cache Hit %</th>
+          <th class="text-right py-2 px-2">Avg Latency</th>
+          <th class="text-right py-2 px-2">Final Cache Util</th>
+        </tr></thead>
+        <tbody id="node_tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Cache Utilization Over Time</h2>
+      <canvas id="chart_cache"></canvas>
+    </div>
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Total Requests Over Time</h2>
+      <canvas id="chart_requests"></canvas>
+    </div>
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Queue Length Over Time</h2>
+      <canvas id="chart_queue"></canvas>
+    </div>
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Cache Hit Ratio Per Request</h2>
+      <canvas id="chart_hits"></canvas>
+    </div>
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Request Throughput (req/s)</h2>
+      <canvas id="chart_req_tp"></canvas>
+    </div>
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Token Throughput (tokens/s)</h2>
+      <canvas id="chart_tok_tp"></canvas>
+    </div>
+  </div>
+
+  <!-- Per-Request Table -->
+  <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+    <h2 class="text-xs uppercase tracking-widest text-gray-500 mb-3">Request Log <span id="req_count" class="text-gray-600"></span></h2>
+    <div class="overflow-x-auto max-h-96 overflow-y-auto">
+      <table class="w-full text-xs">
+        <thead class="sticky top-0 bg-d-800"><tr class="text-gray-500 border-b border-d-600">
+          <th class="text-left py-2 px-1">#</th>
+          <th class="text-left py-2 px-1">Subject</th>
+          <th class="text-right py-2 px-1">Target</th>
+          <th class="text-right py-2 px-1">Processed</th>
+          <th class="text-right py-2 px-1">Routed</th>
+          <th class="text-right py-2 px-1">Cache Hit</th>
+          <th class="text-right py-2 px-1">Latency</th>
+          <th class="text-right py-2 px-1">Cache Util</th>
+        </tr></thead>
+        <tbody id="req_tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const COLORS = ['#6366f1','#22d3ee','#f59e0b','#ef4444','#10b981','#ec4899','#8b5cf6','#f97316'];
+const charts = {};
+const runName = window.location.pathname.split('/').pop();
+document.getElementById('run_name').textContent = runName;
+
+Chart.defaults.color = '#6b7280';
+Chart.defaults.borderColor = '#2a2d3a';
+Chart.defaults.font.size = 11;
+
+let configLoaded = false;
+async function load(){
+  const fetches = [
+    fetch(`/api/runs/${runName}/results`).then(r=>r.json()).catch(()=>[]),
+    fetch(`/api/runs/${runName}/metrics`).then(r=>r.json()).catch(()=>[]),
+  ];
+  if(!configLoaded) fetches.push(fetch(`/api/runs/${runName}/config`).then(r=>r.json()).catch(()=>null));
+  const [results, metrics, cfg] = await Promise.all(fetches);
+  if(cfg && !configLoaded){
+    document.getElementById('config_yaml').textContent = cfg.yaml;
+    configLoaded = true;
+  }
+  renderSummary(results);
+  renderNodeTable(results, metrics);
+  renderCharts(results, metrics);
+  renderRequestLog(results);
+}
+
+function renderSummary(results){
+  if(!results.length){document.getElementById('summary_cards').innerHTML='<p class="text-gray-600 col-span-4">No results data.</p>';return}
+  const total = results.length;
+  const avgHit = results.reduce((s,r)=>s+parseFloat(r.cache_hit_ratio||0),0)/total;
+  const avgTime = results.reduce((s,r)=>s+parseFloat(r.total_time_s||0),0)/total;
+  const routed = results.filter(r=>r.routed_to && r.routed_from !== r.routed_to).length;
+  const cards = [
+    {label:'Total Requests', value:total, color:'text-indigo-400'},
+    {label:'Avg Cache Hit', value:(avgHit*100).toFixed(1)+'%', color:'text-cyan-400'},
+    {label:'Avg Latency', value:avgTime.toFixed(4)+'s', color:'text-amber-400'},
+    {label:'Routed Requests', value:routed, color:'text-emerald-400'},
+  ];
+  document.getElementById('summary_cards').innerHTML = cards.map(c=>`
+    <div class="bg-d-800 border border-d-600 rounded-lg p-4">
+      <div class="text-[10px] uppercase tracking-widest text-gray-500">${c.label}</div>
+      <div class="text-2xl font-semibold ${c.color} mt-1">${c.value}</div>
+    </div>`).join('');
+}
+
+function renderNodeTable(results, metrics){
+  const nodes = {};
+  results.forEach(r=>{
+    const nid = r.processed_by;
+    if(!nodes[nid]) nodes[nid]={requests:0,routed:0,cache_hits:0,hit_sum:0,time_sum:0};
+    nodes[nid].requests++;
+    nodes[nid].hit_sum += parseFloat(r.cache_hit_ratio||0);
+    nodes[nid].time_sum += parseFloat(r.total_time_s||0);
+    if(parseFloat(r.cache_hit_ratio||0) > 0) nodes[nid].cache_hits++;
+  });
+  results.forEach(r=>{
+    if(r.routed_from && r.routed_to && r.routed_from !== r.routed_to){
+      const from = r.routed_from;
+      if(!nodes[from]) nodes[from]={requests:0,routed:0,cache_hits:0,hit_sum:0,time_sum:0};
+      nodes[from].routed++;
+    }
+  });
+  const finalUtil = {};
+  metrics.forEach(m=>{ finalUtil[m.node_id] = parseFloat(m.cache_utilization||0); });
+
+  const tbody = document.getElementById('node_tbody');
+  tbody.innerHTML = Object.keys(nodes).sort((a,b)=>a-b).map(nid=>{
+    const n = nodes[nid];
+    const avgHit = n.requests ? (n.hit_sum/n.requests*100).toFixed(1)+'%' : '—';
+    const avgTime = n.requests ? (n.time_sum/n.requests).toFixed(4)+'s' : '—';
+    const util = finalUtil[nid] != null ? (finalUtil[nid]*100).toFixed(1)+'%' : '—';
+    return `<tr class="border-b border-d-600/50">
+      <td class="py-2 px-2"><span class="inline-block w-2 h-2 rounded-full mr-1.5" style="background:${COLORS[nid%COLORS.length]}"></span>Node ${nid}</td>
+      <td class="text-right py-2 px-2">${n.requests}</td>
+      <td class="text-right py-2 px-2">${n.routed}</td>
+      <td class="text-right py-2 px-2">${n.cache_hits}</td>
+      <td class="text-right py-2 px-2">${avgHit}</td>
+      <td class="text-right py-2 px-2">${avgTime}</td>
+      <td class="text-right py-2 px-2">${util}</td>
+    </tr>`;
+  }).join('');
+}
+
+function makeDatasets(nodeIds, byNode, t0, field){
+  return nodeIds.map((nid,i)=>({
+    label:`Node ${nid}`,
+    data: byNode[nid].map(m=>({x: (parseFloat(m.timestamp)-t0).toFixed(0), y: parseFloat(m[field]||0)})),
+    borderColor: COLORS[i%COLORS.length],
+    backgroundColor: COLORS[i%COLORS.length]+'20',
+    fill: false, tension:0.3, pointRadius:2, borderWidth:1.5,
+  }));
+}
+
+function makeOrUpdate(id, type, datasets, opts){
+  if(charts[id]){
+    charts[id].data.datasets = datasets;
+    charts[id].update('none');
+  } else {
+    charts[id] = new Chart(document.getElementById(id),{type, data:{datasets}, options:opts});
+  }
+}
+
+function renderCharts(results, metrics){
+  const byNode = {};
+  metrics.forEach(m=>{
+    if(!byNode[m.node_id]) byNode[m.node_id]=[];
+    byNode[m.node_id].push(m);
+  });
+  const nodeIds = Object.keys(byNode).sort((a,b)=>a-b);
+  const t0 = metrics.length ? parseFloat(metrics[0].timestamp) : 0;
+
+  const lineOpts = (yLabel,extra={}) => ({scales:{x:{title:{display:true,text:'Time (s)'}},y:{title:{display:true,text:yLabel},min:0,...extra}},plugins:{legend:{labels:{boxWidth:8,padding:8}}},animation:false});
+
+  // Metrics charts — scale cache_utilization to %
+  const cacheDs = nodeIds.map((nid,i)=>({
+    label:`Node ${nid}`,
+    data: byNode[nid].map(m=>({x: (parseFloat(m.timestamp)-t0).toFixed(0), y: (parseFloat(m.cache_utilization)*100).toFixed(1)})),
+    borderColor: COLORS[i%COLORS.length], backgroundColor: COLORS[i%COLORS.length]+'20',
+    fill: false, tension:0.3, pointRadius:2, borderWidth:1.5,
+  }));
+  makeOrUpdate('chart_cache','line',cacheDs,lineOpts('Cache %',{max:100}));
+  makeOrUpdate('chart_requests','line',makeDatasets(nodeIds,byNode,t0,'total_requests'),lineOpts('Cumulative Requests'));
+  makeOrUpdate('chart_queue','line',makeDatasets(nodeIds,byNode,t0,'queue_length'),lineOpts('Queue Length'));
+  makeOrUpdate('chart_req_tp','line',makeDatasets(nodeIds,byNode,t0,'req_throughput'),lineOpts('req/s'));
+  makeOrUpdate('chart_tok_tp','line',makeDatasets(nodeIds,byNode,t0,'token_throughput'),lineOpts('tokens/s'));
+
+  // Cache hit scatter from results
+  const hitsByNode = {};
+  results.forEach((r,i)=>{
+    const nid = r.processed_by;
+    if(!hitsByNode[nid]) hitsByNode[nid]=[];
+    hitsByNode[nid].push({x:i, y:(parseFloat(r.cache_hit_ratio||0)*100).toFixed(1)});
+  });
+  const hitNodeIds = Object.keys(hitsByNode).sort((a,b)=>a-b);
+  const hitDs = hitNodeIds.map((nid,i)=>({
+    label:`Node ${nid}`, data: hitsByNode[nid],
+    backgroundColor: COLORS[i%COLORS.length]+'80', pointRadius:2,
+  }));
+  makeOrUpdate('chart_hits','scatter',hitDs,{scales:{x:{title:{display:true,text:'Request #'}},y:{title:{display:true,text:'Cache Hit %'},min:0,max:100}},plugins:{legend:{labels:{boxWidth:8,padding:8}}},animation:false});
+}
+
+function renderRequestLog(results){
+  document.getElementById('req_count').textContent = `(${results.length})`;
+  const tbody = document.getElementById('req_tbody');
+  tbody.innerHTML = results.slice(-10).map((r,i)=>{
+    const hit = (parseFloat(r.cache_hit_ratio||0)*100).toFixed(1);
+    const hitColor = hit > 50 ? 'text-emerald-400' : hit > 0 ? 'text-amber-400' : 'text-gray-500';
+    const routed = (r.routed_from && r.routed_to && r.routed_from !== r.routed_to) ? `${r.routed_from}→${r.routed_to}` : '—';
+    return `<tr class="border-b border-d-600/30 hover:bg-d-700/50">
+      <td class="py-1.5 px-1 text-gray-500">${r.request_id||i}</td>
+      <td class="py-1.5 px-1">${r.subject||'—'}</td>
+      <td class="text-right py-1.5 px-1">${r.target_node??'—'}</td>
+      <td class="text-right py-1.5 px-1">${r.processed_by??'—'}</td>
+      <td class="text-right py-1.5 px-1">${routed}</td>
+      <td class="text-right py-1.5 px-1 ${hitColor}">${hit}%</td>
+      <td class="text-right py-1.5 px-1">${parseFloat(r.total_time_s||0).toFixed(4)}s</td>
+      <td class="text-right py-1.5 px-1">${(parseFloat(r.cache_utilization||0)*100).toFixed(1)}%</td>
+    </tr>`;
+  }).join('');
+}
+
+load();
+setInterval(load, 10000); // poll every 10s
+</script>
+</body>
+</html>

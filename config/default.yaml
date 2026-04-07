@@ -1,35 +1,29 @@
 cluster:
   num_nodes: 4
   base_port: 8100
-
 network:
   lan_delay_ms: 2.0
   delay_jitter_ms: 0.5
-
 node:
   max_tokens: 1000
-  eviction_policy: "lru"
-
+  eviction_policy: lru
 llm:
   prefill_cost_factor: 0.0001
   decode_cost_factor: 0.001
   max_output_tokens: 20
-
 router:
-  policy: "cache_aware"
-
+  policy: cache_aware
 broadcast:
-  trigger: "queue_length"
+  trigger: queue_length
   queue_threshold: 3
   interval_s: 5.0
-
 requests:
-  csv_path: "data/requests.csv"
-  topics:               # regex patterns — empty list means all 57 topics
-    - "high_school_.*"  # all high school subjects
-    - "philosophy"
-    - "machine_learning"
-  rows_per_topic: 2    # 0 = take all rows from each matched topic
+  csv_path: data/requests.csv
+  topics:
+  - philosophy:0.2
+  - machine_learning:0.2
+  - c*:0.8
+  rows_per_topic: 0
   shuffle: true
   seed: 42
-  node_assignment: "round_robin"  # original | round_robin | hash_topic | random
+  node_assignment: round_robin

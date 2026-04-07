@@ -1,0 +1,31 @@
+cluster:
+  num_nodes: 2                    # Start with 2 on Mac (memory limited)
+  base_port: 8100
+
+sglang:
+  model_path: Qwen/Qwen2.5-0.5B-Instruct   # ~1GB, smallest viable model
+  tp_size: 1                      # tensor parallelism (1 for Mac)
+  mem_fraction_static: 0.3        # fraction of memory for KV cache (low for 2 nodes on 16GB Mac)
+  max_new_tokens: 64
+  temperature: 0.0                # deterministic for experiments
+  context_length: 2048            # limit context for small models
+
+router:
+  policy: cache_aware             # cache_aware | round_robin | random
+  snapshot_poll_interval_s: 2.0   # how often to poll radix tree snapshots (seconds)
+
+broadcast:
+  trigger: queue_length
+  queue_threshold: 3
+  interval_s: 5.0
+
+requests:
+  csv_path: data/requests.csv
+  topics:
+    - elementary_mathematics:0.8
+    - high_school_macroeconomics:0.8
+    - high_school_mathematics:0.8
+    - "*:0"
+  shuffle: true
+  seed: 42
+  node_assignment: round_robin

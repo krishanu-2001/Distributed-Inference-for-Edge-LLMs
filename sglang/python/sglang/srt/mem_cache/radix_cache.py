@@ -579,6 +579,53 @@ class RadixCache(BasePrefixCache):
     def total_size(self):
         return self._total_size_helper()
 
+    def snapshot(self) -> dict:
+        """Return a lightweight CPU-only snapshot of the radix tree.
+
+        The snapshot contains no GPU tensors — only token ID lists and
+        metadata — so it can be safely serialised to JSON and sent over
+        the network to an external cache-aware router.
+
+        Nodes are emitted in DFS pre-order. Each node carries
+        ``num_children`` so the consumer can reconstruct the tree
+        structure and compute full root-to-node token paths.
+
+        Returns a dict with:
+          - total_tokens: int — number of cached tokens
+          - num_nodes: int
+          - nodes: list of {token_ids, num_kv_indices, lock_ref,
+                            hit_count, last_access_time, num_children}
+        """
+        nodes = []
+        total_tokens = 0
+
+        # DFS pre-order: push children in reverse so the first child
+        # is popped (visited) first.
+        stack = [self.root_node]
+        while stack:
+            nd = stack.pop()
+            num_kv = len(nd.value) if nd.value is not None else 0
+            total_tokens += num_kv
+            token_ids = list(nd.key.token_ids) if nd.key is not None else []
+            children_list = list(nd.children.values())
+            nodes.append({
+                "token_ids": token_ids,
+                "num_kv_indices": num_kv,
+                "lock_ref": nd.lock_ref,
+                "hit_count": nd.hit_count,
+                "last_access_time": nd.last_access_time,
+                "num_children": len(children_list),
+            })
+            # Push in reverse so first child is visited next
+            for child in reversed(children_list):
+                stack.append(child)
+
+        return {
+            "total_tokens": total_tokens,
+            "num_nodes": len(nodes),
+            "nodes": nodes,
+        }
+
     def evict(self, params: EvictParams) -> EvictResult:
         if self.disable:
             return EvictResult()
