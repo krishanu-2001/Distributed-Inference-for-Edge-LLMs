@@ -1,0 +1,32 @@
+cluster:
+  num_nodes: 4
+  base_port: 8200
+  sglang_base_port: 9200
+
+network:
+  lan_delay_ms: 2.0
+  delay_jitter_ms: 0.5
+
+router:
+  policy: "cache_aware"
+  snapshot_poll_interval_s: 0.1
+  local_snapshot_settle_timeout_s: 0
+  local_snapshot_settle_poll_s: 0.01
+
+sglang:
+  model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  python_executable: "python"
+  gpu_id: 2
+  tp_size: 1
+  mem_fraction_static: 0.2
+  context_length: 8192
+  temperature: 0.0
+  max_tokens: 1
+  startup_timeout_s: 180.0
+  enable_metrics: true
+  log_dir: "runs/sglang_logs"
+  use_local_checkout: true
+
+requests:
+  csv_path: "requests_law_test_200.csv"
+  keep_running_after_demo: false
