@@ -9,14 +9,14 @@ network:
 
 router:
   policy: "cache_aware"
-  snapshot_poll_interval_s: 0.1
+  snapshot_poll_interval_s: 0.5
   local_snapshot_settle_timeout_s: 0
   local_snapshot_settle_poll_s: 0.01
 
 sglang:
   model_path: "Qwen/Qwen2.5-0.5B-Instruct"
   python_executable: "python"
-  gpu_id: 2
+  gpu_id: 1
   tp_size: 1
   mem_fraction_static: 0.2
   context_length: 8192
@@ -28,5 +28,5 @@ sglang:
   use_local_checkout: true
 
 requests:
-  csv_path: "requests_law_test_200.csv"
+  csv_path: "requests.csv"
   keep_running_after_demo: false

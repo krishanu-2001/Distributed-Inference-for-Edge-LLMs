@@ -26,6 +26,8 @@ Thumbs.db
 *.swo
 
 # Data & Runs
-runs/
+runs/*/run.log
+runs/sglang_logs
 data/
 datasets/
+
