@@ -271,30 +271,45 @@ class InferenceNode:
                 # Peer snapshots are intentionally lazy estimates, but the ingress node
                 # should always route using a fresh view of its own SGLang radix tree.
                 await self.refresh_local_snapshot(broadcast=False)
-                decision = self.router.route(token_ids)
-                if decision.node_id == self.node_id:
+                if not self.config.router.routing_enabled:
+                    expected_matched_tokens = self.router.expected_match_for_node(
+                        self.node_id, token_ids
+                    )
                     result = await self._process_local_request(
                         payload,
-                        expected_matched_tokens=decision.expected_matched_tokens,
+                        expected_matched_tokens=expected_matched_tokens,
                     )
+                    selected_node_id = self.node_id
+                    all_expected_matches = {self.node_id: expected_matched_tokens}
                 else:
-                    logger.info(
-                        "Node %s routing request to node %s (expected matched tokens=%s)",
-                        self.node_id,
-                        decision.node_id,
-                        decision.expected_matched_tokens,
-                    )
-                    result = await self.network.forward_request(
-                        self.all_ports[decision.node_id],
-                        payload,
-                    )
-                    result["routed_from"] = self.node_id
-                    result["routed_to"] = decision.node_id
+                    decision = self.router.route(token_ids)
+                    selected_node_id = decision.node_id
+                    all_expected_matches = decision.all_expected_matches
+                    if decision.node_id == self.node_id:
+                        result = await self._process_local_request(
+                            payload,
+                            expected_matched_tokens=decision.expected_matched_tokens,
+                        )
+                    else:
+                        logger.info(
+                            "Node %s routing request to node %s "
+                            "(expected matched tokens=%s)",
+                            self.node_id,
+                            decision.node_id,
+                            decision.expected_matched_tokens,
+                        )
+                        result = await self.network.forward_request(
+                            self.all_ports[decision.node_id],
+                            payload,
+                        )
+                        result["routed_from"] = self.node_id
+                        result["routed_to"] = decision.node_id
 
                 result["routing_debug"] = {
                     "ingress_node_id": self.node_id,
-                    "selected_node_id": decision.node_id,
-                    "all_expected_cache_hit_tokens": decision.all_expected_matches,
+                    "routing_enabled": self.config.router.routing_enabled,
+                    "selected_node_id": selected_node_id,
+                    "all_expected_cache_hit_tokens": all_expected_matches,
                 }
                 future.set_result(result)
             except Exception as exc:

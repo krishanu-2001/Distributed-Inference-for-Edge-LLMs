@@ -24,6 +24,31 @@ from src.sglang_cluster.network import NetworkSimulator
 from src.sglang_cluster.node import InferenceNode
 
 
+def resolve_run_dir(config) -> Path:
+    if not config.run.name:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return PROJECT_ROOT / "runs" / f"sglang_run_{timestamp}"
+
+    run_name = str(config.run.name).strip()
+    if not run_name:
+        raise ValueError("run.name cannot be empty.")
+
+    run_name_path = Path(run_name)
+    if run_name_path.is_absolute() or len(run_name_path.parts) != 1:
+        raise ValueError(
+            "run.name must be a single directory name under runs/, not a path."
+        )
+
+    run_dir = PROJECT_ROOT / "runs" / run_name
+    if run_dir.exists() and not config.run.overwrite_existing:
+        raise FileExistsError(
+            f"Run directory {run_dir} already exists. Choose another run.name "
+            "or set run.overwrite_existing: true."
+        )
+
+    return run_dir
+
+
 def configure_logging(run_dir: Path):
     log_path = run_dir / "run.log"
     logging.basicConfig(
@@ -233,8 +258,7 @@ async def stop_nodes(nodes: list[InferenceNode]):
 async def main(config_path: str):
     config = load_config(config_path)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = PROJECT_ROOT / "runs" / f"sglang_run_{timestamp}"
+    run_dir = resolve_run_dir(config)
     run_dir.mkdir(parents=True, exist_ok=True)
     configure_logging(run_dir)
 

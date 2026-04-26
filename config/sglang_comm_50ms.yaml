@@ -1,0 +1,39 @@
+cluster:
+  num_nodes: 4
+  base_port: 8250
+  sglang_base_port: 9250
+
+network:
+  lan_delay_ms: 50.0
+  delay_jitter_ms: 20.0
+
+run:
+  # When null, outputs go to runs/sglang_run_<timestamp>.
+  # Set to a name like "baseline_no_routing" to write under runs/baseline_no_routing.
+  name: comm_50ms_gpu0.1_n4
+  overwrite_existing: false
+
+router:
+  policy: "cache_aware"
+  routing_enabled: true
+  snapshot_poll_interval_s: 0.5
+  local_snapshot_settle_timeout_s: 0
+  local_snapshot_settle_poll_s: 0.01
+
+sglang:
+  model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  python_executable: "python"
+  gpu_id: 2
+  tp_size: 1
+  mem_fraction_static: 0.1
+  context_length: 8192
+  temperature: 0.0
+  max_tokens: 1
+  startup_timeout_s: 180.0
+  enable_metrics: true
+  log_dir: "runs/sglang_logs"
+  use_local_checkout: true
+
+requests:
+  csv_path: "requests.csv"
+  keep_running_after_demo: false

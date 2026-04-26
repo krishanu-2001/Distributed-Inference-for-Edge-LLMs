@@ -20,6 +20,7 @@ class NetworkConfig:
 @dataclass
 class RouterConfig:
     policy: str = "cache_aware"
+    routing_enabled: bool = True
     snapshot_poll_interval_s: float = 2.0
     local_snapshot_settle_timeout_s: float = 1.0
     local_snapshot_settle_poll_s: float = 0.05
@@ -54,12 +55,19 @@ class RequestsConfig:
 
 
 @dataclass
+class RunConfig:
+    name: str | None = None
+    overwrite_existing: bool = False
+
+
+@dataclass
 class Config:
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     router: RouterConfig = field(default_factory=RouterConfig)
     sglang: SGLangConfig = field(default_factory=SGLangConfig)
     requests: RequestsConfig = field(default_factory=RequestsConfig)
+    run: RunConfig = field(default_factory=RunConfig)
 
 
 def load_config(path: str = "config/sglang.yaml") -> Config:
@@ -77,6 +85,7 @@ def load_config(path: str = "config/sglang.yaml") -> Config:
         ("router", RouterConfig),
         ("sglang", SGLangConfig),
         ("requests", RequestsConfig),
+        ("run", RunConfig),
     ]
     for section_name, section_type in section_types:
         if section_name in raw:
