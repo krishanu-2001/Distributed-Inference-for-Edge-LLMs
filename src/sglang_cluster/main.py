@@ -9,7 +9,6 @@ import os
 import signal
 import socket
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -24,10 +23,9 @@ from src.sglang_cluster.network import NetworkSimulator
 from src.sglang_cluster.node import InferenceNode
 
 
-def resolve_run_dir(config) -> Path:
+def resolve_run_dir(config, config_path: str) -> Path:
     if not config.run.name:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return PROJECT_ROOT / "runs" / f"sglang_run_{timestamp}"
+        return PROJECT_ROOT / "runs" / Path(config_path).stem
 
     run_name = str(config.run.name).strip()
     if not run_name:
@@ -131,7 +129,14 @@ async def maybe_run_demo(run_dir: Path, config, base_port: int) -> bool:
         "expected_cache_hit_ratio",
         "sglang_prompt_tokens",
         "sglang_cache_hit_tokens",
+        "sglang_uncached_prefill_tokens",
         "sglang_cache_hit_ratio",
+        "inference_time_s",
+        "actual_sglang_inference_time_s",
+        "communication_time_s",
+        "routing_processing_time_s",
+        "local_processing_time_s",
+        "other_processing_time_s",
         "local_snapshot_match_after_process",
         "total_time_s",
         "generated_text",
@@ -186,9 +191,24 @@ async def maybe_run_demo(run_dir: Path, config, base_port: int) -> bool:
                     "sglang_cache_hit_tokens": result.get(
                         "sglang_cache_hit_tokens"
                     ),
+                    "sglang_uncached_prefill_tokens": result.get(
+                        "sglang_uncached_prefill_tokens"
+                    ),
                     "sglang_cache_hit_ratio": result.get(
                         "sglang_cache_hit_ratio"
                     ),
+                    "inference_time_s": result.get("inference_time_s"),
+                    "actual_sglang_inference_time_s": result.get(
+                        "actual_sglang_inference_time_s"
+                    ),
+                    "communication_time_s": result.get("communication_time_s"),
+                    "routing_processing_time_s": result.get(
+                        "routing_processing_time_s"
+                    ),
+                    "local_processing_time_s": result.get(
+                        "local_processing_time_s"
+                    ),
+                    "other_processing_time_s": result.get("other_processing_time_s"),
                     "local_snapshot_match_after_process": result.get(
                         "local_snapshot_match_after_process"
                     ),
@@ -218,7 +238,23 @@ async def maybe_run_demo(run_dir: Path, config, base_port: int) -> bool:
                 "sglang_cache_hit_tokens": result.get(
                     "sglang_cache_hit_tokens"
                 ),
+                "sglang_uncached_prefill_tokens": result.get(
+                    "sglang_uncached_prefill_tokens"
+                ),
                 "sglang_cache_hit_ratio": result.get("sglang_cache_hit_ratio"),
+                "inference_time_s": result.get("inference_time_s"),
+                "actual_sglang_inference_time_s": result.get(
+                    "actual_sglang_inference_time_s"
+                ),
+                "communication_time_s": result.get("communication_time_s"),
+                "routing_processing_time_s": result.get(
+                    "routing_processing_time_s"
+                ),
+                "local_processing_time_s": result.get(
+                    "local_processing_time_s"
+                ),
+                "other_processing_time_s": result.get("other_processing_time_s"),
+                "total_time_s": result.get("total_time_s"),
                 "per_node_expected_cache_hits": [
                     {
                         "node_id": int(candidate_node),
@@ -258,7 +294,7 @@ async def stop_nodes(nodes: list[InferenceNode]):
 async def main(config_path: str):
     config = load_config(config_path)
 
-    run_dir = resolve_run_dir(config)
+    run_dir = resolve_run_dir(config, config_path)
     run_dir.mkdir(parents=True, exist_ok=True)
     configure_logging(run_dir)
 

@@ -10,7 +10,6 @@ network:
 run:
   # When null, outputs go to runs/sglang_run_<timestamp>.
   # Set to a name like "baseline_no_routing" to write under runs/baseline_no_routing.
-  name: baseline_no_routing
   overwrite_existing: false
 
 router:
@@ -23,9 +22,9 @@ router:
 sglang:
   model_path: "Qwen/Qwen2.5-0.5B-Instruct"
   python_executable: "python"
-  gpu_id: 1
+  gpu_id: 0
   tp_size: 1
-  mem_fraction_static: 0.2
+  mem_fraction_static: 0.04
   context_length: 8192
   temperature: 0.0
   max_tokens: 1

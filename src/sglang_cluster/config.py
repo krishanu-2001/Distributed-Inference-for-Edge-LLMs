@@ -24,6 +24,7 @@ class RouterConfig:
     snapshot_poll_interval_s: float = 2.0
     local_snapshot_settle_timeout_s: float = 1.0
     local_snapshot_settle_poll_s: float = 0.05
+    sync_tree_max_payload_mb: float = 64.0
 
 
 @dataclass
@@ -39,6 +40,7 @@ class SGLangConfig:
     max_tokens: int = 32
     startup_timeout_s: float = 180.0
     enable_metrics: bool = True
+    use_proxy_inference_time: bool = True
     log_dir: str = "runs/sglang_logs"
     use_local_checkout: bool = True
 
