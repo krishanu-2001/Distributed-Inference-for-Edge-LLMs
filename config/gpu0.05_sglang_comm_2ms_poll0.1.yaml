@@ -20,7 +20,7 @@ router:
 sglang:
   model_path: "Qwen/Qwen2.5-0.5B-Instruct"
   python_executable: "python"
-  gpu_id: 2
+  gpu_id: 3
   tp_size: 1
   mem_fraction_static: 0.05
   context_length: 8192

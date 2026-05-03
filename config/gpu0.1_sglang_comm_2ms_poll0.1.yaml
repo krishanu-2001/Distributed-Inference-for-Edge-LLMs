@@ -19,7 +19,7 @@ run:
 sglang:
   context_length: 8192
   enable_metrics: true
-  gpu_id: 1
+  gpu_id: 3
   log_dir: runs/sglang_logs
   max_tokens: 1
   mem_fraction_static: 0.1
