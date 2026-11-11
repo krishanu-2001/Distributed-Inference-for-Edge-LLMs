@@ -36,6 +36,10 @@ PY=$VENV/bin/python
 NUM_NODES=4
 SGLANG_PORT0=30000
 JOB_SECONDS=${JOB_SECONDS:-$((4 * 3600))}
+# SMOKE=1: 30 requests per run, to check the stack end-to-end on gpu-a100-dev:
+#   SMOKE=1 JOB_SECONDS=1800 sbatch -p gpu-a100-dev -t 00:30:00 scripts/tacc/run_experiments.slurm
+SMOKE=${SMOKE:-0}
+LIMIT_ARGS=(); [ "$SMOKE" = 1 ] && LIMIT_ARGS=(--limit 30)
 START=$(date +%s)
 DEADLINE=$((START + JOB_SECONDS - 600))   # keep 10 minutes for shutdown + summary
 
@@ -43,10 +47,16 @@ DEADLINE=$((START + JOB_SECONDS - 600))   # keep 10 minutes for shutdown + summa
 source /etc/profile.d/z00_lmod.sh 2>/dev/null || true
 module load python/3.12.11
 module load cuda/12.8 2>/dev/null || true             # FlashInfer JIT needs a real nvcc
-export CUDA_HOME=/opt/apps/cuda/12.8 PATH="/opt/apps/cuda/12.8/bin:$VENV/bin:$PATH"
+# SGLang's JIT kernels are C++20 (<concepts>); the default gcc 9.4 can't build them.
+# Use gcc 13.2 by path (its module swaps MODULEPATH and drops cuda/12.8).
+GCC=/scratch/tacc/apps/gcc/13.2.0
+export CUDA_HOME=/opt/apps/cuda/12.8 PATH="$GCC/bin:/opt/apps/cuda/12.8/bin:$VENV/bin:$PATH"
+export LD_LIBRARY_PATH="$GCC/lib64:$GCC/lib:${LD_LIBRARY_PATH:-}"
+export CC=$GCC/bin/gcc CXX=$GCC/bin/g++ CUDAHOSTCXX=$GCC/bin/g++ NVCC_CCBIN=$GCC/bin/g++
 export HF_HOME=$BASE/hf HF_HUB_OFFLINE=1
 export FLASHINFER_WORKSPACE_BASE=$BASE/cache XDG_CACHE_HOME=$BASE/cache \
-       TORCHINDUCTOR_CACHE_DIR=$BASE/cache/inductor TRITON_CACHE_DIR=$BASE/cache/triton
+       TORCHINDUCTOR_CACHE_DIR=$BASE/cache/inductor TRITON_CACHE_DIR=$BASE/cache/triton \
+       TVM_FFI_CACHE_DIR=$BASE/cache/tvm-ffi
 mkdir -p "$BASE/cache"
 
 OUT=$REPO/runs/tacc/job_${SLURM_JOB_ID:-local}
@@ -55,6 +65,7 @@ NGPU=$(nvidia-smi -L | wc -l)
 echo "node $(hostname)  gpus=$NGPU  out=$OUT  start=$(date)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PY" -c "import torch, sglang; print('torch', torch.__version__, '| sglang', sglang.__version__)"
+echo "host compiler: $(g++ --version | head -1)"
 
 SERVER_PIDS=()
 
@@ -110,6 +121,7 @@ SKIPPED=()
 run_one() {  # name config requests policy est_minutes
   local name=$1 cfg=$2 req=$3 policy=$4 est=$5
   local remaining=$((DEADLINE - $(date +%s)))
+  [ "$SMOKE" = 1 ] && est=1
   if [ $remaining -lt $((est * 60)) ]; then
     echo "[$(date +%T)] SKIP $name: needs ~${est} min, ${remaining}s left"
     SKIPPED+=("$name"); return
@@ -117,7 +129,7 @@ run_one() {  # name config requests policy est_minutes
   flush_caches
   echo "[$(date +%T)] RUN $name ($policy, $req)"
   timeout $remaining "$PY" -m src.main --config "$cfg" --requests "$req" --policy "$policy" \
-    --exit --run-dir "$OUT/$name" > "$OUT/$name.stdout" 2>&1
+    --exit --run-dir "$OUT/$name" "${LIMIT_ARGS[@]}" > "$OUT/$name.stdout" 2>&1
   echo "[$(date +%T)] done $name exit=$?  errors=$(grep -c Traceback "$OUT/$name.stdout")"
   RUN_DIRS+=("$OUT/$name")
 }
