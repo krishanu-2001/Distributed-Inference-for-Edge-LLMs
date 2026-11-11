@@ -1,0 +1,36 @@
+# Real SGLang backends on a Lonestar6 gpu-a100 node (scripts/tacc/run_experiments.slurm).
+# Workload: 4096 req, 128 groups x 32, 2048-token prefix, 32 output; ~14 of 128 prefixes fit per server
+# Cache pressure: each SGLang server is started with --max-total-tokens 32768, and
+# node.max_tokens mirrors it so the router's estimate of its own cache matches.
+
+cluster:
+  num_nodes: 4
+  base_port: 8100
+
+network:
+  lan_delay_ms: 2.0
+  delay_jitter_ms: 0.5
+
+node:
+  max_tokens: 32768
+  eviction_policy: "lru"
+
+llm:
+  backend: "sglang"
+  sglang_host: "127.0.0.1"
+  sglang_base_port: 30000      # node i -> SGLang server on port 30000 + i
+  max_output_tokens: 32   # fallback when a row has no output_len
+  request_timeout_s: 300
+
+router:
+  policy: "cache_aware"        # overridden per run with --policy
+
+broadcast:
+  trigger: "timer"
+  queue_threshold: 3
+  interval_s: 2.0
+
+requests:
+  path: "data/sglang_gsp_big.csv"
+  node_assignment: "round_robin"
+  seed: 42

@@ -29,6 +29,9 @@ def summarize(run_dir: str) -> dict:
         "n": len(df),
         "errors": int(df["error"].notna().sum()),
         "hit_%": round(100 * ok["cache_hit_ratio"].mean(), 1),
+        # what the routing node predicted for the node it picked (paper: "Exp. Hit")
+        "exp_hit_%": round(100 * (ok["route_expected_tokens"] / ok["input_tokens"]).mean(), 1)
+        if "route_expected_tokens" in ok and ok["route_expected_tokens"].notna().any() else None,
         "fwd_%": round(100 * ok["routed_to"].notna().mean(), 1),
         "hot_%": round(100 * share.max(), 1) if len(share) else None,
         "lat_mean_s": round(ok["total_time_s"].mean(), 4),

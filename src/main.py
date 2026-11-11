@@ -22,9 +22,10 @@ from src.visualization import Visualizer
 logger = logging.getLogger(__name__)
 
 
-def setup_run_dir() -> str:
-    """Create runs/run_<timestamp>/ and log to it. Called from main, not on import."""
-    run_dir = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+def setup_run_dir(run_dir: str | None = None) -> str:
+    """Create the run dir (default runs/run_<timestamp>/) and log to it.
+    Called from main, not on import."""
+    run_dir = run_dir or f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(run_dir, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -161,7 +162,7 @@ async def run_demo(nodes: list[InferenceNode], config, run_dir: str, limit: int 
 
 
 async def main(args):
-    run_dir = setup_run_dir()
+    run_dir = setup_run_dir(args.run_dir)
     config = load_config(args.config)
     if args.requests:
         config.requests.path = args.requests
@@ -236,6 +237,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="Only send the first N requests (0 = all)"
+    )
+    parser.add_argument(
+        "--run-dir", help="Output directory (default runs/run_<timestamp>)"
     )
     parser.add_argument(
         "--exit", action="store_true", help="Exit after the demo instead of serving"
