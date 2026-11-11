@@ -8,7 +8,7 @@ class RadixNode:
         "last_access", "kv_cache_id", "parent",
     ]
 
-    def __init__(self, token_ids: tuple = (), parent: "RadixNode | None" = None):
+    def __init__(self, token_ids: tuple = (), parent: Optional["RadixNode"] = None):
         self.token_ids: tuple = token_ids
         self.children: dict[int, "RadixNode"] = {}
         self.ref_count: int = 0
@@ -22,162 +22,134 @@ class RadixNode:
 
 
 class RadixTree:
-    def __init__(self):
+    """Prefix trie over token ids.
+
+    If `kv_cache` is given (a node's *actual* tree), every node owns one KV
+    entry covering exactly its edge tokens: inserts allocate, edge splits split
+    the entry, evictions free it. Approximate (peer-estimate) trees pass None.
+    """
+
+    def __init__(self, kv_cache=None):
         self.root = RadixNode()
         self.total_tokens: int = 0
+        self.kv_cache = kv_cache
 
-    def match_prefix(self, token_ids: list[int]) -> tuple[int, list[RadixNode]]:
-        """Find longest matching prefix. Returns (match_length, list of matched nodes)."""
+    def match_prefix(
+        self, token_ids: list[int], touch: bool = True
+    ) -> tuple[int, list[RadixNode]]:
+        """Find longest matching prefix. Returns (match_length, fully matched nodes).
+
+        match_length includes a partial match into the last edge. Set
+        touch=False for read-only probes (e.g. routing) so LRU order is unchanged.
+        """
         node = self.root
         matched = 0
         pos = 0
         matched_nodes = []
+        now = time.time()
 
         while pos < len(token_ids):
-            first_token = token_ids[pos]
-            if first_token not in node.children:
+            child = node.children.get(token_ids[pos])
+            if child is None:
                 break
 
-            child = node.children[first_token]
-            edge = child.token_ids
-            edge_len = len(edge)
-            remaining = len(token_ids) - pos
-
-            match_len = 0
-            for i in range(min(edge_len, remaining)):
-                if edge[i] != token_ids[pos + i]:
-                    break
-                match_len += 1
-
-            if match_len == 0:
-                break
-
+            match_len = self._common_len(child.token_ids, token_ids, pos)
             matched += match_len
             pos += match_len
 
-            if match_len < edge_len:
-                # Partial edge match — can't descend further
+            if match_len < len(child.token_ids):
+                # Partial edge match: can't descend further
                 break
 
-            # Full edge match
-            child.last_access = time.time()
+            if touch:
+                child.last_access = now
             matched_nodes.append(child)
             node = child
 
         return matched, matched_nodes
 
-    def insert(self, token_ids: list[int], kv_cache_id: str | None = None):
-        """Insert token sequence into tree, splitting edges as needed."""
-        if not token_ids:
-            return
+    @staticmethod
+    def _common_len(edge: tuple, token_ids: list[int], pos: int) -> int:
+        n = min(len(edge), len(token_ids) - pos)
+        i = 0
+        while i < n and edge[i] == token_ids[pos + i]:
+            i += 1
+        return i
 
+    def _new_node(self, token_ids: tuple, parent: RadixNode) -> RadixNode:
+        node = RadixNode(token_ids=token_ids, parent=parent)
+        if self.kv_cache is not None:
+            entry = self.kv_cache.allocate(len(token_ids))
+            if entry is None:
+                raise MemoryError(
+                    f"KV cache full: need {len(token_ids)}, "
+                    f"free {self.kv_cache.free_tokens}"
+                )
+            node.kv_cache_id = entry.cache_id
+        parent.children[token_ids[0]] = node
+        self.total_tokens += len(token_ids)
+        return node
+
+    def insert(self, token_ids: list[int]) -> int:
+        """Insert token sequence, splitting edges as needed. Returns tokens added.
+
+        With a kv_cache attached, the caller must ensure
+        len(token_ids) - match_prefix(token_ids)[0] tokens are free first.
+        """
         node = self.root
         pos = 0
+        now = time.time()
 
         while pos < len(token_ids):
-            first_token = token_ids[pos]
+            child = node.children.get(token_ids[pos])
+            if child is None:
+                self._new_node(tuple(token_ids[pos:]), node).last_access = now
+                return len(token_ids) - pos
 
-            if first_token not in node.children:
-                # Create new leaf
-                new_node = RadixNode(
-                    token_ids=tuple(token_ids[pos:]),
-                    parent=node,
-                )
-                new_node.kv_cache_id = kv_cache_id
-                new_node.last_access = time.time()
-                node.children[first_token] = new_node
-                self.total_tokens += len(new_node.token_ids)
-                return
-
-            child = node.children[first_token]
             edge = child.token_ids
-            edge_len = len(edge)
-            remaining = len(token_ids) - pos
+            match_len = self._common_len(edge, token_ids, pos)
 
-            match_len = 0
-            for i in range(min(edge_len, remaining)):
-                if edge[i] != token_ids[pos + i]:
-                    break
-                match_len += 1
-
-            if match_len == 0:
-                # Shouldn't happen since first_token matched
-                break
-
-            if match_len < edge_len:
-                # Partial match — split the edge
-                mid_node = RadixNode(
-                    token_ids=edge[:match_len],
-                    parent=node,
-                )
-                mid_node.last_access = time.time()
-
-                # Move original child under mid_node
+            if match_len < len(edge):
+                # Partial match: split edge into mid (shared part) + child (rest)
+                mid = RadixNode(token_ids=edge[:match_len], parent=node)
+                mid.last_access = now
+                if self.kv_cache is not None and child.kv_cache_id is not None:
+                    mid.kv_cache_id = self.kv_cache.split(
+                        child.kv_cache_id, match_len
+                    ).cache_id
+                # No ref_count copy needed: mid always has `child` below it,
+                # so it can't become an evictable leaf while child is pinned.
                 child.token_ids = edge[match_len:]
-                child.parent = mid_node
-                mid_node.children[child.token_ids[0]] = child
-
-                # Replace in parent
-                node.children[first_token] = mid_node
-
-                # Add remaining tokens as new branch
-                pos += match_len
-                if pos < len(token_ids):
-                    new_node = RadixNode(
-                        token_ids=tuple(token_ids[pos:]),
-                        parent=mid_node,
-                    )
-                    new_node.kv_cache_id = kv_cache_id
-                    new_node.last_access = time.time()
-                    mid_node.children[token_ids[pos]] = new_node
-                    self.total_tokens += len(new_node.token_ids)
-
-                return
-
-            # Full edge match — descend
+                child.parent = mid
+                mid.children[child.token_ids[0]] = child
+                node.children[mid.token_ids[0]] = mid
+                node = mid
+            else:
+                child.last_access = now
+                node = child
             pos += match_len
-            child.last_access = time.time()
-            node = child
 
-        # All tokens already in tree — nothing to add
+        return 0
 
     def evict_lru(self) -> int:
-        """Evict LRU leaf with ref_count == 0. Returns tokens freed."""
+        """Evict the LRU leaf with ref_count == 0. Returns tokens freed (0 if none).
+
+        Nodes are never merged after eviction: merging would orphan nodes held
+        by in-flight requests and complicate per-node KV ownership.
+        """
         leaves = []
         self._collect_leaves(self.root, leaves)
-
         evictable = [l for l in leaves if l.ref_count == 0]
         if not evictable:
             return 0
 
         victim = min(evictable, key=lambda n: n.last_access)
+        del victim.parent.children[victim.token_ids[0]]
         freed = len(victim.token_ids)
-        cache_id = victim.kv_cache_id
-
-        # Remove from parent
-        parent = victim.parent
-        if parent is not None:
-            key = victim.token_ids[0]
-            if key in parent.children:
-                del parent.children[key]
-
-            # Merge parent with its only child if parent is not root
-            if (
-                len(parent.children) == 1
-                and parent is not self.root
-                and parent.ref_count == 0
-            ):
-                only_child = list(parent.children.values())[0]
-                parent.token_ids = parent.token_ids + only_child.token_ids
-                parent.kv_cache_id = only_child.kv_cache_id
-                parent.children = only_child.children
-                parent.last_access = only_child.last_access
-                parent.ref_count = only_child.ref_count
-                for c in parent.children.values():
-                    c.parent = parent
-
+        if self.kv_cache is not None and victim.kv_cache_id is not None:
+            self.kv_cache.free(victim.kv_cache_id)
         self.total_tokens -= freed
-        return freed, cache_id
+        return freed
 
     def _collect_leaves(self, node: RadixNode, leaves: list):
         if node.is_leaf and node is not self.root:

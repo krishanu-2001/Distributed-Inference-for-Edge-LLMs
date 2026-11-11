@@ -3,6 +3,7 @@ import json
 import random
 import time
 import logging
+import aiohttp
 from aiohttp import web
 
 from src.radix_tree import RadixTree
@@ -23,12 +24,13 @@ class MockLLM:
 
     async def generate(
         self, input_tokens: list[int], cached_prefix_len: int, max_output_tokens: int
-    ) -> tuple[list[int], float]:
+    ) -> tuple[list[int], float, int]:
         """
         Simulate inference.
         - Prefill: O(n^2) on uncached tokens
         - Decode: O(n) per output token (n = current sequence length)
-        Returns (output_token_ids, elapsed_seconds).
+        Returns (output_token_ids, elapsed_seconds, cached_tokens). The mock's
+        cache is exactly the node's radix tree, so cached_tokens = cached_prefix_len.
         """
         new_tokens = len(input_tokens) - cached_prefix_len # 9  
         prefill_time = self.prefill_cost * (new_tokens ** 2) # LP^2D
@@ -42,7 +44,72 @@ class MockLLM:
         await asyncio.sleep(total_time)
 
         output_tokens = [random.randint(0, 31999) for _ in range(max_output_tokens)]
-        return output_tokens, total_time
+        return output_tokens, total_time, cached_prefix_len
+
+    async def close(self):
+        pass
+
+
+class SGLangLLM:
+    """Real inference against an SGLang server (one server per node).
+
+    Sends token ids directly (`input_ids`) so SGLang's RadixAttention cache sees
+    exactly the sequences our routers reason about. Greedy decoding with
+    ignore_eos gives a fixed output length per request. SGLang's own
+    `meta_info.cached_tokens` is returned as the ground-truth cache hit.
+    """
+
+    def __init__(self, url: str, timeout_s: float):
+        self.url = url.rstrip("/")
+        self.timeout = aiohttp.ClientTimeout(total=timeout_s)
+        self._session: aiohttp.ClientSession | None = None
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=self.timeout)
+        return self._session
+
+    async def generate(
+        self, input_tokens: list[int], cached_prefix_len: int, max_output_tokens: int
+    ) -> tuple[list[int], float, int | None]:
+        payload = {
+            "input_ids": input_tokens,
+            "sampling_params": {
+                "max_new_tokens": max_output_tokens,
+                "temperature": 0.0,
+                "ignore_eos": True,
+            },
+        }
+        t0 = time.perf_counter()
+        async with self._get_session().post(f"{self.url}/generate", json=payload) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"SGLang {resp.status}: {(await resp.text())[:300]}")
+            data = await resp.json()
+        elapsed = time.perf_counter() - t0
+        if isinstance(data, list):
+            data = data[0]
+        meta = data.get("meta_info", {})
+        output_tokens = data.get("output_ids")
+        if not output_tokens:
+            n = meta.get("completion_tokens", max_output_tokens)
+            output_tokens = [random.randint(0, 31999) for _ in range(n)]
+        return output_tokens, elapsed, meta.get("cached_tokens")
+
+    async def close(self):
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+
+
+def make_llm(config: Config, node_id: int):
+    llm = config.llm
+    if llm.backend == "mock":
+        return MockLLM(llm.prefill_cost_factor, llm.decode_cost_factor)
+    if llm.backend == "sglang":
+        return SGLangLLM(
+            f"http://{llm.sglang_host}:{llm.sglang_base_port + node_id}",
+            llm.request_timeout_s,
+        )
+    raise ValueError(f"unknown llm.backend {llm.backend!r} (mock | sglang)")
 
 
 class InferenceNode:
@@ -63,13 +130,14 @@ class InferenceNode:
         self.all_node_ids = all_node_ids
         self.all_ports = all_ports  # node_id -> port
 
-        self.radix_tree = RadixTree()
         self.kv_cache = KVCacheManager(config.node.max_tokens)
-        self.llm = MockLLM(config.llm.prefill_cost_factor, config.llm.decode_cost_factor)
+        self.radix_tree = RadixTree(kv_cache=self.kv_cache)
+        self.llm = make_llm(config, node_id)
         self.router = Router(
             own_node_id=node_id,
             all_node_ids=all_node_ids,
             policy=config.router.policy,
+            local_tree=self.radix_tree,
         )
         self.network = network
 
@@ -81,6 +149,7 @@ class InferenceNode:
         self._runner = None
         self._queue_task = None
         self._broadcast_task = None
+        self._inflight_broadcast: asyncio.Task | None = None
         self.request_log: list[dict] = []
 
     def _setup_routes(self):
@@ -96,8 +165,9 @@ class InferenceNode:
         """External request: enqueue and return response when done."""
         body = await request.json()
         text = body.get("text", "")
-        future = asyncio.get_event_loop().create_future()
-        await self.incoming_queue.put((text, future))
+        max_out = body.get("max_output_tokens")
+        future = asyncio.get_running_loop().create_future()
+        await self.incoming_queue.put((text, max_out, future))
         result = await future
         return web.json_response(result)
 
@@ -105,7 +175,7 @@ class InferenceNode:
         """Internal forwarded request: process directly (no re-routing)."""
         body = await request.json()
         token_ids = body["token_ids"]
-        result = await self._process_request(token_ids)
+        result = await self._process_request(token_ids, body.get("max_output_tokens"))
         return web.json_response(result)
 
     async def handle_status(self, request: web.Request) -> web.Response:
@@ -125,8 +195,8 @@ class InferenceNode:
             "node_id": self.node_id,
             "actual_tree": self.radix_tree.pretty_print(),
             "approx_trees": {
-                str(nid): self.router.approx_trees[nid].pretty_print()
-                for nid in self.all_node_ids
+                str(nid): tree.pretty_print()
+                for nid, tree in self.router.approx_trees.items()
             },
         })
 
@@ -140,66 +210,96 @@ class InferenceNode:
 
     # --- Core Processing ---
 
-    async def _process_request(self, token_ids: list[int]) -> dict:
-        """Process an inference request on this node."""
+    def _ensure_free(self, needed: int) -> int:
+        """Evict LRU leaves until `needed` tokens are free (or nothing is evictable).
+        Returns tokens evicted."""
+        evicted = 0
+        while self.kv_cache.free_tokens < needed:
+            freed = self.radix_tree.evict_lru()
+            if freed == 0:
+                break
+            evicted += freed
+        return evicted
+
+    def _cache_sequence(self, sequence: list[int]) -> int:
+        """Insert `sequence` into the local tree, evicting as needed.
+
+        If memory is still short (everything left is pinned by in-flight
+        requests), only the prefix that fits is cached and a warning is logged.
+        Returns the number of tokens that could not be cached.
+        """
+        match_len, _ = self.radix_tree.match_prefix(sequence, touch=False)
+        needed = len(sequence) - match_len
+        self._ensure_free(needed)
+        dropped = max(0, needed - self.kv_cache.free_tokens)
+        if dropped:
+            logger.warning(
+                f"Node {self.node_id}: KV cache full, caching only "
+                f"{needed - dropped}/{needed} new tokens"
+            )
+            sequence = sequence[: len(sequence) - dropped]
+        self.radix_tree.insert(sequence)
+        return dropped
+
+    async def _process_request(
+        self, token_ids: list[int], max_output_tokens: int | None = None
+    ) -> dict:
+        """Process an inference request on this node.
+
+        max_output_tokens: per-request output length (e.g. from SGLang's
+        benchmark); defaults to config llm.max_output_tokens."""
+        if max_output_tokens is None:
+            max_output_tokens = self.config.llm.max_output_tokens
         self.running_requests += 1
         self.router.update_load(self.node_id, 1)
         start_time = time.time()
+        matched_nodes = []
 
         try:
-            # 1. Match prefix in actual radix tree
+            # 1. Match prefix in actual radix tree; pin matched nodes
             match_len, matched_nodes = self.radix_tree.match_prefix(token_ids)
             self.radix_tree.inc_ref(matched_nodes)
 
-            # 2. Ensure enough memory for new tokens
-            new_token_count = len(token_ids) - match_len + self.config.llm.max_output_tokens
-            evicted_total = 0
-            while self.kv_cache.free_tokens < new_token_count:
-                result = self.radix_tree.evict_lru()
-                if result == 0 or result is None:
-                    break
-                freed_tokens, cache_id = result
-                if cache_id:
-                    self.kv_cache.free(cache_id)
-                evicted_total += freed_tokens
-            if evicted_total > 0:
+            # 2. Reserve memory for new prompt + output tokens
+            new_token_count = (
+                len(token_ids) - match_len + max_output_tokens
+            )
+            evicted = self._ensure_free(new_token_count)
+            if evicted:
                 logger.info(
-                    f"Node {self.node_id}: evicted {evicted_total} tokens "
+                    f"Node {self.node_id}: evicted {evicted} tokens "
                     f"(needed {new_token_count}, free {self.kv_cache.free_tokens})"
                 )
 
             # 3. Run mock LLM inference
-            output_tokens, inference_time = await self.llm.generate(
-                token_ids, match_len, self.config.llm.max_output_tokens
+            output_tokens, inference_time, backend_cached = await self.llm.generate(
+                token_ids, match_len, max_output_tokens
             )
+            # Ground truth from the backend if it reports it (SGLang); for the
+            # mock, the local tree *is* the cache.
+            actual_hit = match_len if backend_cached is None else backend_cached
 
-            # 4. Allocate KV cache for new tokens
-            full_sequence = token_ids + output_tokens
-            new_tokens_to_cache = len(full_sequence) - match_len
-            entry = self.kv_cache.allocate(new_tokens_to_cache)
-            cache_id = entry.cache_id if entry else None
-
-            # 5. Insert full sequence into actual radix tree
-            self.radix_tree.insert(full_sequence, kv_cache_id=cache_id)
-
-            # 6. Dec ref on matched nodes
-            self.radix_tree.dec_ref(matched_nodes)
+            # 4. Cache the full sequence (allocates KV per new tree node)
+            uncached = self._cache_sequence(token_ids + output_tokens)
 
             elapsed = time.time() - start_time
             result = {
                 "node_id": self.node_id,
                 "input_tokens": len(token_ids),
                 "output_tokens": len(output_tokens),
-                "cache_hit_tokens": match_len,
-                "cache_hit_ratio": round(match_len / len(token_ids), 4) if token_ids else 0,
+                "cache_hit_tokens": actual_hit,
+                "cache_hit_ratio": round(actual_hit / len(token_ids), 4) if token_ids else 0,
+                "expected_hit_tokens": match_len,  # this node's tree estimate
                 "inference_time_s": round(inference_time, 4),
                 "total_time_s": round(elapsed, 4),
                 "cache_utilization": round(self.kv_cache.utilization, 4),
+                "uncached_tokens": uncached,
             }
             self.request_log.append(result)
             return result
 
         finally:
+            self.radix_tree.dec_ref(matched_nodes)
             self.running_requests -= 1
             self.router.update_load(self.node_id, -1)
 
@@ -208,15 +308,18 @@ class InferenceNode:
     async def _queue_loop(self):
         """Process requests from incoming queue one-by-one."""
         while True:
-            text, future = await self.incoming_queue.get()
+            text, max_out, future = await self.incoming_queue.get()
             try:
                 token_ids = mock_tokenize(text)
 
-                # Route decision
+                # Route decision, plus the hit the router expects at that node
                 best_node = self.router.route(token_ids)
+                route_expected = self.router.tree_for(best_node).match_prefix(
+                    token_ids, touch=False
+                )[0]
 
                 if best_node == self.node_id:
-                    result = await self._process_request(token_ids)
+                    result = await self._process_request(token_ids, max_out)
                 else:
                     # Forward to another node
                     # TODO: redirecting the redirects. Need to send it to the router.
@@ -225,27 +328,38 @@ class InferenceNode:
                         f"Node {self.node_id}: routing to Node {best_node}"
                     )
                     result = await self.network.forward_request(
-                        self.all_ports[best_node], token_ids
+                        self.all_ports[best_node], token_ids, max_out
                     )
-                    self.router.update_approx_tree(best_node, token_ids)
+                    # Only update the estimate if the peer actually served it
+                    if "error" not in result:
+                        self.router.update_approx_tree(best_node, token_ids)
                     result["routed_from"] = self.node_id
                     result["routed_to"] = best_node
 
+                result["route_expected_tokens"] = route_expected
                 future.set_result(result)
             except Exception as e:
                 future.set_result({"error": str(e), "node_id": self.node_id})
 
-            # Check broadcast trigger after processing
-            await self._maybe_broadcast()
+            # Check broadcast trigger after processing (non-blocking)
+            self._maybe_broadcast()
 
     # --- Broadcast Sync ---
 
-    async def _maybe_broadcast(self):
-        """Broadcast actual tree state if trigger condition is met."""
+    def _maybe_broadcast(self):
+        """Start a background broadcast if the trigger condition is met.
+
+        Runs as a task so the request loop never waits on anti-entropy; skipped
+        if the previous broadcast is still in flight.
+        """
         trigger = self.config.broadcast.trigger
-        if trigger == "queue_length":
-            if self.incoming_queue.qsize() < self.config.broadcast.queue_threshold:
-                await self._do_broadcast()
+        if trigger != "queue_length":
+            return
+        if self.incoming_queue.qsize() >= self.config.broadcast.queue_threshold:
+            return
+        if self._inflight_broadcast and not self._inflight_broadcast.done():
+            return
+        self._inflight_broadcast = asyncio.create_task(self._do_broadcast())
 
     async def _broadcast_timer_loop(self):
         """Timer-based broadcast loop."""
@@ -284,6 +398,9 @@ class InferenceNode:
             self._queue_task.cancel()
         if self._broadcast_task:
             self._broadcast_task.cancel()
+        if self._inflight_broadcast:
+            self._inflight_broadcast.cancel()
+        await self.llm.close()
         if self._runner:
             await self._runner.cleanup()
         logger.info(f"Node {self.node_id} stopped")

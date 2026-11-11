@@ -6,29 +6,44 @@ Course project for **CS 380D - Distributed Systems**, UT Austin. Simulates distr
 
 LLM serving wastes compute recomputing KV caches for shared prefixes. This simulator runs a cluster of inference nodes, each with a **radix tree** of cached prefixes and a **router** that forwards requests to the node with the longest cache match.
 
-**Request flow** (see [`CS 380D - Distributed System (3).pdf`](CS%20380D%20-%20Distributed%20System%20(3).pdf) for architecture diagram):
+**Request flow** (see [`docs/CS 380D - Distributed System (1).pdf`](docs/CS%20380D%20-%20Distributed%20System%20(1).pdf) for architecture diagram):
 
 1. Query arrives at any node's router
-2. Router matches token prefix against **approximate radix trees** (one per node) to find best cache hit
-3. Request routed to selected node over simulated LAN
+2. Router matches the token prefix against its own **exact radix tree** and **approximate radix trees** of each peer
+3. Request is forwarded only if a peer has a strictly longer match (ties stay local); otherwise it runs locally
 4. Target node matches against its **actual radix tree**, reuses cached KV, runs inference on new tokens only
 5. Response returned; nodes periodically **broadcast** trie state to keep approximate trees in sync
 
 ## Setup
 
 ```bash
-conda create -n dist python=3.11
-conda activate dist
-pip install aiohttp pyyaml pandas
+python3.12 -m venv .venv          # Python 3.10+ required
+source .venv/bin/activate
+pip install aiohttp pyyaml pandas pyarrow pytest
+
+# Build data/requests.csv (5-shot MMLU prompts, 13,757 requests) from src/MMLU.parquet
+python -m src.abcd
+
+# Optional: SGLang's "generated-shared-prefix" benchmark workload (1,024 requests)
+python -m src.gen_sglang_gsp --out data/sglang_gsp.csv
+python -m src.gen_sglang_gsp --group-distribution zipf --zipf-alpha 1.1 --out data/sglang_gsp_zipf.csv
 ```
 
 ## Running
 
 ```bash
 python -m src.main --config config/default.yaml
+python -m src.main --config config/default.yaml --limit 200 --exit   # quick run, then exit
+
+# SGLang shared-prefix benchmark, routed vs. no routing, then compare
+python -m src.main --config config/sglang_gsp.yaml --exit
+python -m src.main --config config/sglang_gsp.yaml --exit --policy self
+python -m src.summarize runs/run_<A> runs/run_<B>
 ```
 
-Starts 4 nodes on ports 8100-8103, loads requests from MMLU dataset, prints expanded config + cache hit metrics per request, saves results to `runs/run_<timestamp>/results.csv`.
+CLI overrides: `--requests PATH`, `--policy {cache_aware,round_robin,self}`, `--node-assignment {...}`, `--limit N`, `--exit`. Each run saves the effective config to `runs/run_<timestamp>/config.yaml`.
+
+Starts 4 nodes on ports 8100-8103, sends each request in `requests.path` to the entry node chosen by `requests.node_assignment`, prints cache hit metrics per request, and saves results to `runs/run_<timestamp>/results.csv`. Without `--exit`, the servers keep running afterwards for manual requests.
 
 Send manual requests while running:
 
@@ -46,48 +61,58 @@ cluster:
   num_nodes: 4
   base_port: 8100
 
+network:
+  lan_delay_ms: 2.0          # one-way delay per message
+  delay_jitter_ms: 0.5
+
 node:
-  max_tokens: 1000           # KV cache capacity per node
+  max_tokens: 1000           # KV cache capacity per node (tokens)
   eviction_policy: "lru"
+
+llm:
+  prefill_cost_factor: 0.0001
+  decode_cost_factor: 0.001
+  max_output_tokens: 20
 
 router:
   policy: "cache_aware"      # cache_aware | round_robin | self
 
+broadcast:
+  trigger: "queue_length"    # queue_length | timer
+  queue_threshold: 3         # queue_length: broadcast after a request when queue < threshold
+  interval_s: 5.0            # timer: broadcast period
+
 requests:
-  csv_path: "data/requests.csv"
-  topics:                    # regex patterns (empty = all 57 MMLU subjects)
-    - "high_school_.*"
-    - "philosophy"
-    - "machine_learning"
-  rows_per_topic: 50         # 0 = all rows
-  shuffle: true
+  path: "data/requests.csv"
+  node_assignment: "round_robin"   # round_robin | original | hash_topic | random | weighted
+  node_weights: [0.4, 0.3, 0.2, 0.1]  # only for weighted
   seed: 42
-  node_assignment: "round_robin"  # original | round_robin | hash_topic | random
 ```
 
-Topics accept regex — `"high_school_.*"` expands to all 14 high school subjects. At startup the system prints matched topics with row counts and node distribution.
+Broadcasts run in the background and never block request processing.
 
-**Node assignment strategies:**
+**Node assignment** decides which node each request *enters* at; that node's router may then forward it:
 
 | Strategy | Behavior |
 |---|---|
-| `original` | Keep `target_node` from CSV |
-| `round_robin` | Cycle across nodes evenly |
-| `hash_topic` | Same topic always maps to same node (maximizes prefix sharing) |
-| `random` | Uniform random |
+| `round_robin` | Cycle across nodes in request order (default) |
+| `original` | Keep `target_node` from the CSV |
+| `hash_topic` | All requests of a subject / prefix group enter at the same node |
+| `random` | Uniform random (seeded) |
+| `weighted` | Random with probability ∝ `node_weights` |
 
 ## Experiments
 
 **Routing vs no routing** — compare `router.policy: "cache_aware"` vs `"self"`
 
-**Topic locality** — compare `node_assignment: "hash_topic"` (high prefix sharing) vs `"round_robin"` (spread across nodes)
-
 **Cache pressure** — vary `node.max_tokens` (e.g. 500 vs 10000) to test LRU eviction under different memory constraints
 
-**Topic subsets** — use regex to select domains, e.g. `[".*law.*"]` or `[".*math.*", ".*physics.*", "machine_learning"]`
+**SGLang shared-prefix benchmark** — `config/sglang_gsp.yaml` runs SGLang's `generated-shared-prefix` workload (64 groups × 16 prompts, 2,048-token shared system prompt, 128-token question, 256 output tokens; uniform or Zipf group popularity) through the mock LLM. Prompts are random words, one word per token.
+
+**Anti-entropy frequency** — vary `broadcast.interval_s` with `trigger: "timer"`
 
 Each run outputs to `runs/run_<timestamp>/`:
-- `results.csv` — per-request: cache_hit_ratio, inference_time, routing decisions, node assignments
+- `results.csv` — per-request (`|`-delimited): cache_hit_ratio, inference_time, routing decisions, node assignments, uncached_tokens, error
 - `run.log` — full execution log
 
 ## Technical Details
@@ -97,11 +122,15 @@ Each run outputs to `runs/run_<timestamp>/`:
 | Entry point | `src/main.py` | Starts cluster, runs experiment |
 | Node | `src/node.py` | HTTP server, queue, cache management, routing |
 | Router | `src/router.py` | Cache-aware routing with approximate radix trees per node |
-| Radix tree | `src/radix_tree.py` | Prefix trie with LRU eviction and reference counting |
-| KV cache | `src/kv_cache.py` | Memory allocation tracker |
+| Radix tree | `src/radix_tree.py` | Prefix trie with LRU eviction and reference counting; each node owns the KV entry for its edge tokens |
+| KV cache | `src/kv_cache.py` | Token-granular memory allocation tracker |
 | Network | `src/network.py` | LAN delay + jitter simulation |
-| Request loader | `src/request_loader.py` | Topic filtering (regex), subsetting, shuffling, node assignment |
+| Request builders | `src/abcd.py`, `src/gen_sglang_gsp.py` | 5-shot MMLU prompts; SGLang generated-shared-prefix workload |
+| Request loader | `src/request_loader.py` | Reads the requests CSV and assigns entry nodes |
+| Summary | `src/summarize.py` | Comparison table across run directories |
 | Config | `src/config.py` | Dataclasses loaded from YAML |
+
+Run the tests with `python -m pytest tests`.
 
 LLM inference is mocked with realistic timing: prefill scales O(n^2) on new tokens, decode scales O(n) per token. Network delay defaults to ~2ms + 0.5ms jitter (LAN).
 

@@ -1,5 +1,7 @@
 """Convert MMLU.parquet to a 5-shot CSV for distributed inference."""
 
+import os
+
 import pandas as pd
 
 
@@ -58,6 +60,7 @@ def main():
 
     out = pd.DataFrame(rows)
     out = out.sample(frac=1, random_state=42).reset_index(drop=True)
+    os.makedirs("data", exist_ok=True)
     out.to_csv("data/requests.csv", index=False)
 
     print(f"\nOutput: {len(out)} queries written to data/requests.csv")

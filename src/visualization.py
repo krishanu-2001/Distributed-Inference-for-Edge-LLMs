@@ -9,14 +9,11 @@ class Visualizer:
         return f"{header}\n{tree.pretty_print()}"
 
     @staticmethod
-    def cache_bar(node_id: int, used_mb: float, capacity_mb: float, width: int = 40) -> str:
-        if capacity_mb == 0:
-            ratio = 0
-        else:
-            ratio = used_mb / capacity_mb
+    def cache_bar(node_id: int, used: int, capacity: int, width: int = 40) -> str:
+        ratio = used / capacity if capacity else 0
         filled = int(ratio * width)
         bar = "█" * filled + "░" * (width - filled)
-        return f"Node {node_id}: [{bar}] {used_mb:.1f}/{capacity_mb:.1f} MB ({ratio:.0%})"
+        return f"Node {node_id}: [{bar}] {used}/{capacity} tokens ({ratio:.0%})"
 
     @staticmethod
     def cluster_cache_view(nodes) -> str:
@@ -26,7 +23,7 @@ class Visualizer:
             stats = node.kv_cache.stats()
             lines.append(
                 Visualizer.cache_bar(
-                    node.node_id, stats["used_mb"], stats["capacity_mb"]
+                    node.node_id, stats["used_tokens"], stats["max_tokens"]
                 )
             )
         return "\n".join(lines)
@@ -39,7 +36,7 @@ class Visualizer:
             f"=== Node {node.node_id} (port {node.port}) ===",
             f"  Queue length: {node.incoming_queue.qsize()}",
             f"  Running requests: {node.running_requests}",
-            f"  Cache: {cache_stats['used_mb']:.1f}/{cache_stats['capacity_mb']:.1f} MB "
+            f"  Cache: {cache_stats['used_tokens']}/{cache_stats['max_tokens']} tokens "
             f"({cache_stats['utilization']:.0%})",
             f"  Cache entries: {cache_stats['num_entries']}",
             f"  Radix tree tokens: {node.radix_tree.total_tokens}",

@@ -1,0 +1,43 @@
+# SGLang "generated-shared-prefix" benchmark on the mock-LLM simulator.
+# Workload: python -m src.gen_sglang_gsp --out data/sglang_gsp.csv
+#   (SGLang defaults: 64 groups x 16 prompts, 2048-token shared system prompt,
+#    128-token question, 256 output tokens -> 1024 requests, ~2.2k input tokens)
+# Run:      python -m src.main --config config/sglang_gsp.yaml --exit
+#           python -m src.main --config config/sglang_gsp.yaml --exit --policy self
+
+cluster:
+  num_nodes: 4
+  base_port: 8100
+
+network:
+  lan_delay_ms: 2.0
+  delay_jitter_ms: 0.5
+
+node:
+  # ~18 of the 64 shared prefixes fit per node; all 64 fit cluster-wide only
+  # if nodes specialize, which is the regime where routing matters.
+  max_tokens: 40000
+  eviction_policy: "lru"
+
+llm:
+  # Scaled down so 1024 serial requests finish in minutes:
+  # full 2.2k-token prefill ~0.05 s, 256-token decode ~0.06 s.
+  prefill_cost_factor: 0.00000001
+  decode_cost_factor: 0.0000001
+  max_output_tokens: 256      # fallback; gsp rows carry their own output_len
+
+router:
+  policy: "cache_aware"       # cache_aware | round_robin | self
+
+broadcast:
+  trigger: "timer"
+  queue_threshold: 3
+  interval_s: 2.0
+
+requests:
+  path: "data/sglang_gsp.csv"
+  # How requests are split across entry nodes:
+  #   round_robin | original | hash_topic | random | weighted
+  node_assignment: "round_robin"
+  # node_weights: [0.4, 0.3, 0.2, 0.1]   # used when node_assignment: weighted
+  seed: 42
