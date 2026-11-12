@@ -94,7 +94,7 @@ start_servers() {  # $1 = KV cap (tokens), $2 = tag for log names
   done
   for i in $(seq 0 $((NUM_NODES - 1))); do
     local ok=0
-    for _ in $(seq 1 300); do   # up to 25 min (a cold kernel cache takes ~15 min)
+    for _ in $(seq 1 480); do   # up to 40 min (starts have taken 4-23 min)
       curl -sf "http://127.0.0.1:$((SGLANG_PORT0 + i))/health" >/dev/null && { ok=1; break; }
       sleep 5
     done
