@@ -134,9 +134,12 @@ JOB_SECONDS=7200 sbatch -p gpu-a100-dev -t 02:00:00 scripts/tacc/run_experiments
 
 # Quick end-to-end check (30 requests per run)
 SMOKE=1 JOB_SECONDS=1800 sbatch -p gpu-a100-dev -t 00:30:00 scripts/tacc/run_experiments.slurm
+
+# Only half the matrix: RUNS=gsp or RUNS=mmlu
+RUNS=gsp JOB_SECONDS=7200 sbatch -p gpu-a100-dev -t 02:00:00 scripts/tacc/run_experiments.slurm
 ```
 
-Notes: the job uses allocation `IRI26037` (edit `#SBATCH -A`). Keep `JOB_SECONDS` equal to `-t`, since runs that won't fit in the remaining time are skipped. SGLang JIT-compiles C++20 kernels at server start, so the script puts gcc 13.2 first on `PATH`; the default gcc 9.4 fails with `fatal error: concepts`. The first server start takes about 10 minutes while kernels compile.
+Notes: the job uses allocation `IRI26037` (edit `#SBATCH -A`). Keep `JOB_SECONDS` equal to `-t`, since runs that won't fit in the remaining time are skipped. SGLang JIT-compiles C++20 kernels at server start, so the script puts gcc 13.2 first on `PATH`; the default gcc 9.4 fails with `fatal error: concepts`. The first server start on a cold kernel cache takes about 15 minutes (the script waits up to 25); later starts take about 4.
 
 ## Technical Details
 

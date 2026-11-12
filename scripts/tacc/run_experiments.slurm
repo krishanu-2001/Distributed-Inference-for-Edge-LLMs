@@ -40,6 +40,8 @@ JOB_SECONDS=${JOB_SECONDS:-$((4 * 3600))}
 #   SMOKE=1 JOB_SECONDS=1800 sbatch -p gpu-a100-dev -t 00:30:00 scripts/tacc/run_experiments.slurm
 SMOKE=${SMOKE:-0}
 LIMIT_ARGS=(); [ "$SMOKE" = 1 ] && LIMIT_ARGS=(--limit 30)
+# RUNS=gsp or RUNS=mmlu runs only that half of the matrix (default: all)
+RUNS=${RUNS:-all}
 START=$(date +%s)
 DEADLINE=$((START + JOB_SECONDS - 600))   # keep 10 minutes for shutdown + summary
 
@@ -92,7 +94,7 @@ start_servers() {  # $1 = KV cap (tokens), $2 = tag for log names
   done
   for i in $(seq 0 $((NUM_NODES - 1))); do
     local ok=0
-    for _ in $(seq 1 180); do   # up to 15 min (first start JIT-compiles kernels)
+    for _ in $(seq 1 300); do   # up to 25 min (a cold kernel cache takes ~15 min)
       curl -sf "http://127.0.0.1:$((SGLANG_PORT0 + i))/health" >/dev/null && { ok=1; break; }
       sleep 5
     done
@@ -135,13 +137,13 @@ run_one() {  # name config requests policy est_minutes
 }
 
 # --- Experiment matrix (most important first) ---
-if start_servers 32768 gsp; then
+if [[ $RUNS =~ all|gsp ]] && start_servers 32768 gsp; then
   run_one gsp_uniform_routed config/tacc/sglang_gsp_big.yaml data/sglang_gsp_big.csv      cache_aware 25
   run_one gsp_uniform_self   config/tacc/sglang_gsp_big.yaml data/sglang_gsp_big.csv      self        25
   run_one gsp_zipf_routed    config/tacc/sglang_gsp_big.yaml data/sglang_gsp_big_zipf.csv cache_aware 25
   run_one gsp_zipf_self      config/tacc/sglang_gsp_big.yaml data/sglang_gsp_big_zipf.csv self        25
 fi
-if start_servers 6144 mmlu; then
+if [[ $RUNS =~ all|mmlu ]] && start_servers 6144 mmlu; then
   run_one mmlu_routed config/tacc/sglang_mmlu.yaml data/requests.csv cache_aware 30
   run_one mmlu_self   config/tacc/sglang_mmlu.yaml data/requests.csv self        30
 fi
