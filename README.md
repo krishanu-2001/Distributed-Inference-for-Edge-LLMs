@@ -115,6 +115,29 @@ Each run outputs to `runs/run_<timestamp>/`:
 - `results.csv` — per-request (`|`-delimited): cache_hit_ratio, inference_time, routing decisions, node assignments, uncached_tokens, error
 - `run.log` — full execution log
 
+### Real SGLang servers on TACC (Lonestar6)
+
+`scripts/tacc/run_experiments.slurm` starts 4 SGLang servers (Qwen2.5-0.5B-Instruct) on one GPU node, caps each KV cache with `--max-total-tokens` to force eviction, and runs `cache_aware` vs `self` on the shared-prefix (uniform, Zipf) and MMLU workloads (`config/tacc/*.yaml`, `llm.backend: sglang`). Caches are flushed between runs and a comparison table is written to `runs/tacc/job_<id>/summary.txt`.
+
+```bash
+# one time, on a login node
+bash scripts/tacc/setup_sglang.sh        # venv in $SCRATCH/llm/venv-sglang + model download
+python -m src.gen_sglang_gsp --num-groups 128 --prompts-per-group 32 --output-len 32 --out data/sglang_gsp_big.csv
+python -m src.gen_sglang_gsp --num-groups 128 --prompts-per-group 32 --output-len 32 \
+    --group-distribution zipf --zipf-alpha 1.1 --out data/sglang_gsp_big_zipf.csv
+python -m src.abcd
+mkdir -p runs/tacc
+
+# Recommended: gpu-a100-dev (2 h limit). The whole matrix takes ~1.5 h, and dev
+# usually starts within minutes, while gpu-a100 can queue for 15+ hours.
+JOB_SECONDS=7200 sbatch -p gpu-a100-dev -t 02:00:00 scripts/tacc/run_experiments.slurm
+
+# Quick end-to-end check (30 requests per run)
+SMOKE=1 JOB_SECONDS=1800 sbatch -p gpu-a100-dev -t 00:30:00 scripts/tacc/run_experiments.slurm
+```
+
+Notes: the job uses allocation `IRI26037` (edit `#SBATCH -A`). Keep `JOB_SECONDS` equal to `-t`, since runs that won't fit in the remaining time are skipped. SGLang JIT-compiles C++20 kernels at server start, so the script puts gcc 13.2 first on `PATH`; the default gcc 9.4 fails with `fatal error: concepts`. The first server start takes about 10 minutes while kernels compile.
+
 ## Technical Details
 
 | Component | File | Role |
